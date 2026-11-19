@@ -1,0 +1,22 @@
+{
+  "name": "vaani-backend",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Stateless voice-assistant API. Same code runs on Node.js and Cloudflare Workers.",
+  "engines": { "node": ">=20" },
+  "scripts": {
+    "dev": "node --watch src/node.js",
+    "start": "node src/node.js",
+    "test": "node --test",
+    "bench": "node bench/bench.js",
+    "deploy:cf": "npx wrangler deploy"
+  },
+  "dependencies": {
+    "@hono/node-server": "^2.1.6",
+    "hono": "^4.13.16"
+  },
+  "devDependencies": {
+    "autocannon": "^8.0.0"
+  }
+}

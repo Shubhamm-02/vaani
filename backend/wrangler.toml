@@ -1,0 +1,19 @@
+name = "vaani-api"
+main = "src/worker.js"
+compatibility_date = "2026-10-01"
+
+[vars]
+PROVIDER_ORDER = "groq,groq2,openrouter"
+CACHE_TTL_SEC = "604800"  # 7 days; only evergreen, stand-alone questions are cached
+
+# Shared answer cache (L2). Every isolate in every PoP reads the same namespace,
+# so a question answered in Mumbai is a cache hit in Delhi.
+# Free plan: 100k reads/day, 1k writes/day. Create your own with:
+#   npx wrangler kv namespace create vaani-answers
+[[kv_namespaces]]
+binding = "ANSWERS"
+id = "7afdca18570a43fa862cb0026f51a066"
+
+# Secrets (never commit them):
+#   npx wrangler secret put GROQ_API_KEY
+#   npx wrangler secret put OPENROUTER_API_KEY   # optional last-resort fallback

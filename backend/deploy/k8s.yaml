@@ -1,0 +1,54 @@
+# Production path for the 10 lakh concurrent target (paid infra, not used for the free demo).
+# Stateless pods + HPA. Shared cache = managed Redis (UPSTASH_* or swap the client).
+apiVersion: apps/v1
+kind: Deployment
+metadata: { name: vaani-api }
+spec:
+  replicas: 6
+  selector: { matchLabels: { app: vaani-api } }
+  template:
+    metadata: { labels: { app: vaani-api } }
+    spec:
+      topologySpreadConstraints:
+        - maxSkew: 1
+          topologyKey: topology.kubernetes.io/zone
+          whenUnsatisfiable: ScheduleAnyway
+          labelSelector: { matchLabels: { app: vaani-api } }
+      containers:
+        - name: api
+          image: ghcr.io/YOUR_ORG/vaani-api:1.0.0
+          ports: [{ containerPort: 8787 }]
+          envFrom: [{ secretRef: { name: vaani-llm-keys } }]
+          env:
+            - { name: CACHE_MAX_ENTRIES, value: "50000" }
+            - { name: NODE_OPTIONS, value: "--max-old-space-size=768" }
+          resources:
+            requests: { cpu: "1", memory: 512Mi }
+            limits: { memory: 1Gi }
+          readinessProbe: { httpGet: { path: /healthz, port: 8787 }, periodSeconds: 5 }
+          lifecycle: { preStop: { exec: { command: ["sleep", "10"] } } }
+---
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata: { name: vaani-api }
+spec:
+  scaleTargetRef: { apiVersion: apps/v1, kind: Deployment, name: vaani-api }
+  minReplicas: 6
+  maxReplicas: 120
+  metrics:
+    - type: Resource
+      resource: { name: cpu, target: { type: Utilization, averageUtilization: 60 } }
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata: { name: vaani-api }
+spec:
+  minAvailable: 4
+  selector: { matchLabels: { app: vaani-api } }
+---
+apiVersion: v1
+kind: Service
+metadata: { name: vaani-api }
+spec:
+  selector: { app: vaani-api }
+  ports: [{ port: 80, targetPort: 8787 }]

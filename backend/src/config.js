@@ -33,15 +33,30 @@ const PROVIDERS = {
   // at 20 RPM and 50 requests/day (1,000/day once $10 of credit has ever been bought),
   // so it cannot carry load. Its job is to keep answering during a Groq outage,
   // a revoked key, or after both Groq daily quotas are spent.
-  openrouter: (env) => ({
-    name: 'openrouter',
-    baseUrl: 'https://openrouter.ai/api/v1',
-    model: env.OPENROUTER_MODEL || 'google/gemma-4-26b-a4b-it:free',
-    key: env.OPENROUTER_API_KEY,
-    extra: {},
-    maxTokens: 200,
-  }),
+  // Individual free models are often overloaded (429), so OpenRouter is given a list
+  // and falls through it server-side within one request. Reasoning is switched off:
+  // free reasoning models otherwise spend the whole token budget thinking and return
+  // an empty answer (measured), and voice needs the answer, not the thinking.
+  openrouter: (env) => {
+    const models = (env.OPENROUTER_MODELS || env.OPENROUTER_MODEL || OPENROUTER_DEFAULT_MODELS)
+      .split(',')
+      .map((s) => s.trim())
+      .filter(Boolean);
+    return {
+      name: 'openrouter',
+      baseUrl: 'https://openrouter.ai/api/v1',
+      model: models[0],
+      key: env.OPENROUTER_API_KEY,
+      extra: { ...(models.length > 1 ? { models } : {}), reasoning: { enabled: false } },
+      maxTokens: 300, // Devanagari costs ~3x the tokens of English for the same answer
+    };
+  },
 };
+
+// Picked by measurement (Nov 2026), including Hindi: nemotron answered in 0.5-0.8 s
+// in clean Devanagari; ernie is slower but reliable; gemma is good but often at capacity.
+const OPENROUTER_DEFAULT_MODELS =
+  'nvidia/nemotron-3.5-super-vl:free,baidu/ernie-5.5-flash-preview:free,google/gemma-4-26b-a4b-it:free';
 
 export function loadConfig(env = {}) {
   const order = (env.PROVIDER_ORDER || 'groq,groq2,openrouter')

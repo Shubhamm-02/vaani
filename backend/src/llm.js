@@ -155,7 +155,7 @@ export class ProviderChain {
     return {
       text,
       provider: p.name,
-      model: p.model,
+      model: data.model || p.model, // OpenRouter may have served a fallback model
       upstreamMs: this.now() - started,
       tokens: data.usage?.total_tokens,
     };

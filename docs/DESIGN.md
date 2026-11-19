@@ -183,7 +183,19 @@ OpenRouter is a single API in front of hundreds of models hosted by many compani
 2. a revoked or rate-banned Groq key
 3. both Groq daily quotas exhausted late in the day
 
-It is **not** a capacity tier. Free (`:free`) models are capped at **20 requests/min and 50 requests/day** per account (1,000/day once $10 of credit has ever been bought). The default model is `google/gemma-4-26b-a4b-it:free`, an open-weights mixture-of-experts model with ~4B active parameters, chosen because it is fast and is one of the few free models currently listed. The model can be swapped with `OPENROUTER_MODEL`, with no code change. In a paid deployment, OpenRouter (or a second direct provider) would become a real secondary with its own capacity.
+It is **not** a capacity tier. Free (`:free`) models are capped at **20 requests/min and 50 requests/day** per account (1,000/day once $10 of credit has ever been bought).
+
+**Model choice was measured, not guessed.** I tested all 14 free models currently listed, then retested the working ones in Hindi:
+- Individual free models are often at capacity. Gemma 4 returned 429 throughout testing.
+- Free reasoning models can spend the entire token budget "thinking" and return an empty answer.
+
+So the request:
+- sends OpenRouter an ordered list (`models`), and OpenRouter falls through it inside one request
+- switches reasoning off
+
+The list is `nvidia/nemotron-3.5-super-vl:free` → `baidu/ernie-5.5-flash-preview:free` → `google/gemma-4-26b-a4b-it:free`. Measured end to end through this code, the fallback answers in **0.4–0.95 s** in clean Devanagari and English, close to Groq. The list can be changed with `OPENROUTER_MODELS`, with no code change, and the response reports which model actually answered.
+
+In a paid deployment, OpenRouter (or a second direct provider) would become a real secondary with its own capacity.
 
 ### 7.3 Why Gemini was removed
 

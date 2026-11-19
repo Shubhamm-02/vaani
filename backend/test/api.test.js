@@ -166,9 +166,15 @@ describe('loadConfig', () => {
       [
         ['groq', 'openai/gpt-oss-20b'],
         ['groq-120b', 'openai/gpt-oss-120b'],
-        ['openrouter', 'google/gemma-4-26b-a4b-it:free'],
+        ['openrouter', 'nvidia/nemotron-3.5-super-vl:free'],
       ],
     );
+    const or = providers[2];
+    assert.equal(or.extra.models.length, 3, 'OpenRouter falls through a list of free models');
+    assert.deepEqual(or.extra.reasoning, { enabled: false });
+    const single = loadConfig({ OPENROUTER_API_KEY: 'o', OPENROUTER_MODEL: 'x/y:free' }).providers[0];
+    assert.equal(single.model, 'x/y:free');
+    assert.equal(single.extra.models, undefined);
   });
   it('picks up a KV binding as the shared cache', () => {
     assert.ok(loadConfig({ ANSWERS: fakeKv() }).kv);

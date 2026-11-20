@@ -4,6 +4,16 @@ A single-screen Android voice assistant (React Native / Expo SDK 58) with a stat
 
 **Design report:** [docs/DESIGN.md](docs/DESIGN.md) covers constraints, decisions and trade-offs, the caching design, a capacity model for 10 lakh concurrent users, a cost model, measured numbers and [known limitations](docs/DESIGN.md#13-known-limitations).
 
+## Try it
+
+**Install the Android app:** [Vaani APK on Expo](https://expo.dev/accounts/shubhamm.02/projects/vaani/builds/8ea40e9f-19e6-41a7-89da-9041a8ccacb0). Open the link on an Android phone and tap **Install**. The app talks to the live backend, so nothing else is needed.
+
+- The APK isn't from the Play Store, so Android asks you to allow installs from your browser, and Google Play Protect may offer to scan it. Both are normal for apps installed outside the Play Store.
+- Grant the microphone permission on first use. If voice doesn't work offline, download the English (India) or Hindi offline speech pack in Google settings; Vaani falls back to online recognition anyway.
+- Things to say: "kal subah 7 baje ka alarm lagao", "10 minute ka timer lagao", "what's 18% of 2,450", "open Instagram", "explain UPI in one line" (then ask it again), "mummy ko message bhejo", and switch to **हिं** for Hindi.
+
+**Backend health:** <https://vaani-api.vaaniii.workers.dev/healthz>
+
 ## Screenshots
 
 Taken on a Realme RMX3360 (Android 13). The tag under every answer shows where it was computed and how long it took: `ON-DEVICE`, `CACHE · PHONE`, `CACHE · EDGE` or `CLOUD · <provider>`.

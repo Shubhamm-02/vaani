@@ -136,9 +136,12 @@ export function createApp(resolveConfig, { fetchImpl } = {}) {
       // ("who runs it", "in hindi") needs them; for anything else history would just
       // cost tokens and make a shareable answer uncacheable. Decided here, not on the
       // phone, so the policy can change without shipping a new APK.
-      const followUp = isFollowUp(norm, (body.history || []).length > 0, query);
+      // "I couldn't do that" replies are not conversation; don't let them make the next
+      // question look like a follow-up.
+      const sent = (body.history || []).filter((h, i, all) => !(h.role === 'user' && Object.values(CANT_ACT).includes(all[i + 1]?.content)) && !Object.values(CANT_ACT).includes(h.content));
+      const followUp = isFollowUp(norm, sent.length > 0, query);
       if (followUp) s.m.followUps++;
-      const history = followUp ? body.history || [] : [];
+      const history = followUp ? sent : [];
       const cacheable = !followUp && norm.length > 0 && !isTimeSensitive(norm);
       const ttl = s.cfg.cacheTtlSec;
       const key = cacheable ? `${CACHE_VERSION}:${await hashKey(`${locale}|${norm}`)}` : null;

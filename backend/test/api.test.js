@@ -4,7 +4,7 @@ import { createApp } from '../src/app.js';
 import { LRU, TieredCache } from '../src/cache.js';
 import { loadConfig } from '../src/config.js';
 import { SingleFlight, TokenBucket } from '../src/guards.js';
-import { ProviderChain, claimsAction, cleanForSpeech } from '../src/llm.js';
+import { CANT_ACT, ProviderChain, claimsAction, cleanForSpeech } from '../src/llm.js';
 import { isDeviceCommand, isFollowUp, isTimeSensitive, normalize } from '../src/normalize.js';
 
 const DEVICE = 'test-device-0001';
@@ -338,6 +338,8 @@ describe('action guards', () => {
     assert.ok(!isFollowUp(normalize('Who wrote Gitanjali'), true, 'Who wrote Gitanjali'), 'names its subject');
     assert.ok(isFollowUp(normalize('Who is the CEO'), true, 'Who is the CEO'), 'acronym is not a subject');
     assert.ok(isFollowUp(normalize('Population kitni hai'), true, 'Population kitni hai'), 'first word is just sentence case');
+    assert.ok(!isFollowUp(normalize('Who discovered gravity'), true, 'Who discovered gravity'), 'names its own subject');
+    assert.ok(isFollowUp(normalize('ceo kaun hai'), true), 'points back');
     // cut-off reasoning is never spoken
     assert.equal(cleanForSpeech('<think>long reasoning that never closed'), '');
   });
@@ -380,6 +382,16 @@ describe('action guards', () => {
     assert.equal(res.status, 503);
     assert.ok(Date.now() - t0 < 1200, 'answers within the budget');
     assert.equal(calls, 2, 'third provider skipped: not enough time left');
+  });
+
+  it('does not treat an "I couldn\'t do that" reply as conversation', async () => {
+    const app = makeApp();
+    const history = [
+      { role: 'user', content: 'mummy ko message bhejo' },
+      { role: 'assistant', content: CANT_ACT['en-IN'] },
+    ];
+    const r = await (await ask(app, { query: 'Who discovered gravity', history })).json();
+    assert.ok(r.cacheTtlSec > 0, 'stand-alone, so cacheable');
   });
 });
 

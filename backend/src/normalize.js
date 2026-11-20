@@ -65,6 +65,9 @@ const FOLLOW_UP_START = /^(?:what about|how about|and|but|so|also|then|aur|toh|t
 const FOLLOW_UP_WHOLE =
   /^(?:why|why not|why so|how|how so|really|what|who|when|where|kyun|kyon|kaise|kab|kahan|more|again|repeat|elaborate|tell me more|explain more|in (?:hindi|english|short|detail|simple words)|(?:hindi|english|short|detail|simple|simple words) (?:mein|me|में)|translate|simpler|shorter|example|for example|क्यों|कैसे|कब|कहाँ|और|फिर|मतलब|हिंदी में|अंग्रेज़ी में|और बताओ)$/u;
 
+const REFERENTIAL =
+  /^(?:who|when|where|which) (?:is|are|was|were) \S+$|^how (?:much|many|old|big|tall|far|long)(?: \S+)?$|^\S+ (?:kitni|kitna|kitne|kaun|kab|kahan) (?:hai|hain|tha|thi|the)$|^\S+ (?:कितनी|कितना|कितने|कौन|कब|कहाँ) (?:है|हैं|था|थी)$/u;
+
 /**
  * @param {string} normalized
  * @param {boolean} [inConversation] the app sent recent turns: very short questions
@@ -77,9 +80,9 @@ export function isFollowUp(normalized, inConversation = false, raw = '') {
   if (ANAPHORA.test(normalized) || FOLLOW_UP_START.test(normalized) || FOLLOW_UP_WHOLE.test(normalized)) return true;
   if (!inConversation || normalized.split(' ').length > 3) return false;
   if (raw.trim().split(/\s+/).slice(1).some((w) => /^[A-Z][a-z]/.test(w))) return false;
-  // Short but self-contained: definitions ("what is upi", "upi kya hai") and anything
-  // naming its object ("capital of france", "google ka ceo"). The rest leans on context.
-  return !/^(?:what is|what are|define|meaning of) \S+$|^\S+ (?:kya hai|kya hota hai|meaning)$|\S+ (?:of|ka|ki|ke|का|की|के) \S+/u.test(normalized);
+  // Only short questions that point at something already on the table: "who is the CEO",
+  // "population kitni hai", "ceo kaun hai". "who discovered gravity" names its own subject.
+  return REFERENTIAL.test(normalized);
 }
 
 export async function hashKey(text) {

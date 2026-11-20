@@ -60,6 +60,7 @@ test('phone cache key merges trivially different phrasings, keeps locales apart'
   assert.equal(cacheKey("What's the capital of France", 'en-IN'), cacheKey('what is capital of france', 'en-IN'));
   assert.notEqual(cacheKey('what is upi', 'en-IN'), cacheKey('what is upi', 'hi-IN'));
   assert.notEqual(cacheKey('capital of austria', 'en-IN'), cacheKey('capital of australia', 'en-IN'));
+  assert.equal(cacheKey('whats the capital of japan', 'en-IN'), cacheKey('What is the capital of Japan', 'en-IN'));
 });
 
 // ---- alarms & timers in English, Hinglish and Hindi (fixed "now" = 9:00 am) ----

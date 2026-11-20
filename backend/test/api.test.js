@@ -56,6 +56,7 @@ describe('normalize', () => {
     assert.equal(normalize('what is gst please'), 'what is gst');
     assert.equal(normalize('  WHAT   is GST!! '), 'what is gst');
     assert.equal(normalize("What's the capital of France?"), normalize('what is capital of france'));
+    assert.equal(normalize('whats the capital of france'), normalize('what is capital of france'));
     assert.equal(normalize('UPI kya hota hai'), normalize('upi kya hai'));
   });
   it('keeps meaning-bearing words (no risky merges)', () => {
@@ -334,6 +335,9 @@ describe('action guards', () => {
     assert.ok(!isFollowUp(normalize('population kitni hai'), false));
     assert.ok(!isFollowUp(normalize('capital of france'), true));
     assert.ok(!isFollowUp(normalize('what is upi'), true));
+    assert.ok(!isFollowUp(normalize('Who wrote Gitanjali'), true, 'Who wrote Gitanjali'), 'names its subject');
+    assert.ok(isFollowUp(normalize('Who is the CEO'), true, 'Who is the CEO'), 'acronym is not a subject');
+    assert.ok(isFollowUp(normalize('Population kitni hai'), true, 'Population kitni hai'), 'first word is just sentence case');
     // cut-off reasoning is never spoken
     assert.equal(cleanForSpeech('<think>long reasoning that never closed'), '');
   });

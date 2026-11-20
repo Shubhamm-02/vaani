@@ -4,9 +4,24 @@ A single-screen Android voice assistant (React Native / Expo SDK 58) with a stat
 
 **Design report:** [docs/DESIGN.md](docs/DESIGN.md) covers constraints, decisions and trade-offs, the caching design, a capacity model for 10 lakh concurrent users, a cost model, measured numbers and [known limitations](docs/DESIGN.md#13-known-limitations).
 
-| Light | Conversation | Dark |
+## Screenshots
+
+Taken on a Realme RMX3360 (Android 13). The tag under every answer shows where it was computed and how long it took: `ON-DEVICE`, `CACHE · PHONE`, `CACHE · EDGE` or `CLOUD · <provider>`.
+
+| Home (light and dark) | | Where each answer comes from |
 |---|---|---|
-| ![](docs/screen-empty.png) | ![](docs/screen-conversation.png) | ![](docs/screen-dark.png) |
+| <img src="docs/screenshots/00-home-light.png" width="240" alt="Home screen, light theme"> | <img src="docs/screenshots/01-home.png" width="240" alt="Home screen, dark theme"> | <img src="docs/screenshots/02-routing.png" width="240" alt="Hinglish alarm and maths on the phone, a question in the cloud"> |
+| The header has History, a theme button (System → Light → Dark, remembered) and EN/हिं. Suggestions show which commands run on the phone. | | A Hinglish alarm ("kal subah 10 baje…") and maths run **on the phone** in milliseconds; only the open question goes to the **cloud**. |
+
+| Three cache tiers | Honest about what it can't do | Questions never become actions |
+|---|---|---|
+| <img src="docs/screenshots/03-cache-tiers.png" width="240" alt="Cloud, then phone cache, then edge cache"> | <img src="docs/screenshots/04a-honest.png" width="240" alt="Unsupported command answered honestly"> | <img src="docs/screenshots/04b-question-not-action.png" width="240" alt="Hinglish question answered in Hinglish"> |
+| First ask: **cloud**, 573 ms. Same question with "please": **phone cache**, 53 ms. Reworded: **edge cache**, 29 ms. | "Mummy ko message bhejo" gets an honest "I couldn't do that" with no LLM call, instead of a made-up "message sent". "How do I get a passport" is answered, not turned into navigation. | "Open source software kya hai" is a question, so it is answered (in Hinglish) instead of opening an app. |
+
+| Hindi mode | History |
+|---|---|
+| <img src="docs/screenshots/05-hindi.png" width="240" alt="Hindi mode: time, maths and a cloud answer in Devanagari"> | <img src="docs/screenshots/06-history.png" width="240" alt="History pane grouped by day"> |
+| Time and maths answered on the phone in natural Hindi ("अभी दोपहर 2:13 बजे हैं"); the cloud answers in Devanagari; the UI and voice switch to Hindi. | Every command, newest first, grouped by day, with where it was answered. Tap one to ask again. The clear button only clears the screen; history (last 200, on the phone) has its own "Clear history" with a confirmation. |
 
 ## How a command flows
 

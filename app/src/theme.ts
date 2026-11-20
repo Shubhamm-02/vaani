@@ -1,3 +1,6 @@
+import AsyncStorage from '@react-native-async-storage/async-storage';
+import * as SystemUI from 'expo-system-ui';
+import { useCallback, useEffect, useState } from 'react';
 import { useColorScheme } from 'react-native';
 
 // Warm paper and ink with one vermilion accent. Colour carries meaning only in
@@ -34,8 +37,40 @@ const dark: typeof light = {
 
 export type Palette = typeof light;
 
-export function usePalette(): Palette {
-  return useColorScheme() === 'dark' ? dark : light;
+// System by default; the header button cycles System -> Light -> Dark and remembers it.
+export type ThemePref = 'system' | 'light' | 'dark';
+const THEME_KEY = 'vaani.theme';
+const NEXT: Record<ThemePref, ThemePref> = { system: 'light', light: 'dark', dark: 'system' };
+
+export function useTheme() {
+  const system = useColorScheme();
+  const [pref, setPref] = useState<ThemePref>('system');
+
+  useEffect(() => {
+    AsyncStorage.getItem(THEME_KEY)
+      .then((v) => {
+        if (v === 'light' || v === 'dark' || v === 'system') setPref(v);
+      })
+      .catch(() => {});
+  }, []);
+
+  const cycle = useCallback(() => {
+    setPref((p) => {
+      const next = NEXT[p];
+      AsyncStorage.setItem(THEME_KEY, next).catch(() => {});
+      return next;
+    });
+  }, []);
+
+  const scheme: 'light' | 'dark' = pref === 'system' ? (system === 'dark' ? 'dark' : 'light') : pref;
+  const c = scheme === 'dark' ? dark : light;
+
+  // The window behind the app (seen during keyboard and rotation animations) matches too.
+  useEffect(() => {
+    SystemUI.setBackgroundColorAsync(c.bg).catch(() => {});
+  }, [c.bg]);
+
+  return { c, scheme, pref, cycle };
 }
 
 export const font = {

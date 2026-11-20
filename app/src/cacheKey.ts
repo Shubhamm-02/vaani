@@ -8,7 +8,7 @@ export function cacheKey(query: string, locale: Locale): string {
     .normalize('NFKC')
     .toLowerCase()
     .replace(/[’‘]/g, "'")
-    .replace(/\b(what|who|where|how|when|why)'s\b/g, '$1 is')
+    .replace(/\b(what|who|where|how|when|why)'?s\b/g, '$1 is') // "what's" and typed "whats\"
     .replace(/[^\p{L}\p{N}\p{M}\s]/gu, ' ')
     .replace(/\s+/g, ' ')
     .trim()

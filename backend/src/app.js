@@ -136,7 +136,7 @@ export function createApp(resolveConfig, { fetchImpl } = {}) {
       // ("who runs it", "in hindi") needs them; for anything else history would just
       // cost tokens and make a shareable answer uncacheable. Decided here, not on the
       // phone, so the policy can change without shipping a new APK.
-      const followUp = isFollowUp(norm, (body.history || []).length > 0);
+      const followUp = isFollowUp(norm, (body.history || []).length > 0, query);
       if (followUp) s.m.followUps++;
       const history = followUp ? body.history || [] : [];
       const cacheable = !followUp && norm.length > 0 && !isTimeSensitive(norm);

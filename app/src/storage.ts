@@ -14,7 +14,10 @@ export type Turn = {
 };
 
 const DEVICE_KEY = 'vaani.deviceId';
-const TURNS_KEY = 'vaani.turns.v1';
+const HISTORY_KEY = 'vaani.history.v1';
+const CLEARED_KEY = 'vaani.clearedAt';
+const LEGACY_TURNS_KEY = 'vaani.turns.v1';
+export const HISTORY_MAX = 200;
 
 // Anonymous, random, per-install. Used only for rate limiting; no account needed.
 export async function getDeviceId(): Promise<string> {
@@ -25,14 +28,22 @@ export async function getDeviceId(): Promise<string> {
   return id;
 }
 
-export async function loadTurns(): Promise<Turn[]> {
+// One list holds everything (the History pane). The conversation on screen is the part
+// after `clearedAt`, so "clear" gives a fresh screen without deleting history.
+export async function loadHistory(): Promise<{ turns: Turn[]; clearedAt: number }> {
   try {
-    return JSON.parse((await AsyncStorage.getItem(TURNS_KEY)) || '[]');
+    const [[, h], [, c], [, legacy]] = await AsyncStorage.multiGet([HISTORY_KEY, CLEARED_KEY, LEGACY_TURNS_KEY]);
+    const turns: Turn[] = JSON.parse(h ?? legacy ?? '[]'); // first run after upgrade: migrate
+    return { turns: Array.isArray(turns) ? turns : [], clearedAt: Number(c) || 0 };
   } catch {
-    return [];
+    return { turns: [], clearedAt: 0 };
   }
 }
 
-export function saveTurns(turns: Turn[]) {
-  AsyncStorage.setItem(TURNS_KEY, JSON.stringify(turns.slice(-40))).catch(() => {});
+export function saveHistory(turns: Turn[]) {
+  AsyncStorage.setItem(HISTORY_KEY, JSON.stringify(turns.slice(-HISTORY_MAX))).catch(() => {});
+}
+
+export function saveClearedAt(at: number) {
+  AsyncStorage.setItem(CLEARED_KEY, String(at)).catch(() => {});
 }

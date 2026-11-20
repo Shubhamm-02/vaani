@@ -352,7 +352,7 @@ These are deliberate scope limits or platform constraints, not bugs. Each one no
 |---|---|
 | The free tier allows ~2,000 new LLM answers/day (Groq) + 50 (OpenRouter), and 100k requests/day on Workers. Beyond that users hear "busy, try again". | Free tiers. Lifting it needs paid capacity, not code (§8). |
 | Rate limits are per isolate and the device ID is self-reported, so abuse protection is coarse | Next step: WAF / Rate Limiting binding (§11) |
-| No accounts, so history and the answer cache are per phone (40 turns, 300 answers) | Privacy and simplicity |
+| No accounts, so history and the answer cache are per phone (200 turns, 300 answers), with no sync | Privacy and simplicity |
 | Metrics are per isolate; no dashboards or alerts | Next step: Workers Analytics Engine (§14) |
 
 **Testing**

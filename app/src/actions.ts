@@ -141,6 +141,13 @@ export function spokenNumber(value: number): string {
   return (Object.is(rounded, -0) ? 0 : rounded).toLocaleString('en-IN', { maximumFractionDigits: 6 });
 }
 
+// Hindi tells the time by part of day, not am/pm: "दोपहर 2:12", "रात 10:30".
+export function hindiClock(hour: number, minute: number): string {
+  const part = hour >= 4 && hour < 12 ? 'सुबह' : hour < 16 && hour >= 12 ? 'दोपहर' : hour >= 16 && hour < 20 ? 'शाम' : 'रात';
+  const h12 = hour % 12 || 12;
+  return `${part} ${h12}:${String(minute).padStart(2, '0')}`;
+}
+
 export type LocalResult = { reply: string; tag: string };
 
 export async function runLocal(intent: Exclude<Intent, { kind: 'cloud' | 'stop' | 'clear' }>, locale: Locale): Promise<LocalResult> {
@@ -166,23 +173,24 @@ export async function runLocal(intent: Exclude<Intent, { kind: 'cloud' | 'stop' 
         },
       });
       const when = new Date(2000, 0, 1, intent.hour, intent.minute).toLocaleTimeString('en-IN', { hour: 'numeric', minute: '2-digit' });
+      const kab = hindiClock(intent.hour, intent.minute);
       // Android alarms have no date: they ring at the next occurrence of the time.
       const now = new Date();
       const ringsToday = intent.hour * 60 + intent.minute > now.getHours() * 60 + now.getMinutes();
       if (!ringsToday) {
-        return { reply: hi(locale, `Alarm set for ${when} tomorrow.`, `कल ${when} का अलार्म लगा दिया है।`), tag: 'alarm' };
+        return { reply: hi(locale, `Alarm set for ${when} tomorrow.`, `कल ${kab} बजे का अलार्म लगा दिया है।`), tag: 'alarm' };
       }
       if (intent.tomorrow) {
         return {
           reply: hi(
             locale,
             `Alarm set for ${when}. Android rings it at the next ${when}, which is today, so turn it off after it rings if you meant tomorrow.`,
-            `${when} का अलार्म लगा दिया है। ध्यान दें, यह आज ${when} बजे बजेगा, क्योंकि Android अलार्म में तारीख नहीं होती।`,
+            `${kab} बजे का अलार्म लगा दिया है। ध्यान दें, यह आज ${kab} बजे बजेगा, क्योंकि Android अलार्म में तारीख नहीं होती।`,
           ),
           tag: 'alarm',
         };
       }
-      return { reply: hi(locale, `Alarm set for ${when}.`, `${when} का अलार्म लगा दिया है।`), tag: 'alarm' };
+      return { reply: hi(locale, `Alarm set for ${when}.`, `${kab} बजे का अलार्म लगा दिया है।`), tag: 'alarm' };
     }
     case 'call':
       await Linking.openURL(`tel:${intent.number}`);
@@ -208,8 +216,9 @@ export async function runLocal(intent: Exclude<Intent, { kind: 'cloud' | 'stop' 
       return { reply: hi(locale, `Starting directions to ${intent.place}.`, `${intent.place} का रास्ता खोल रही हूँ।`), tag: 'maps' };
     }
     case 'time': {
-      const now = new Date().toLocaleTimeString('en-IN', { hour: 'numeric', minute: '2-digit' });
-      return { reply: hi(locale, `It's ${now}.`, `अभी ${now} बजे हैं।`), tag: 'clock' };
+      const d = new Date();
+      const now = d.toLocaleTimeString('en-IN', { hour: 'numeric', minute: '2-digit' });
+      return { reply: hi(locale, `It's ${now}.`, `अभी ${hindiClock(d.getHours(), d.getMinutes())} बजे हैं।`), tag: 'clock' };
     }
     case 'date': {
       const today = new Date().toLocaleDateString(locale, { weekday: 'long', day: 'numeric', month: 'long', year: 'numeric' });

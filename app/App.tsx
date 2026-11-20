@@ -6,11 +6,14 @@ import * as Haptics from 'expo-haptics';
 import { StatusBar } from 'expo-status-bar';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
+  Alert,
   Animated,
   Easing,
   KeyboardAvoidingView,
+  Modal,
   Pressable,
   ScrollView,
+  SectionList,
   StyleSheet,
   Text,
   TextInput,
@@ -22,8 +25,8 @@ import { runLocal, type Locale } from './src/actions';
 import { getCached, putCached } from './src/answerCache';
 import { askCloud, CloudError } from './src/api';
 import { route } from './src/intents';
-import { getDeviceId, loadTurns, saveTurns, type Route, type Turn } from './src/storage';
-import { font, usePalette, type Palette } from './src/theme';
+import { getDeviceId, HISTORY_MAX, loadHistory, saveClearedAt, saveHistory, type Route, type Turn } from './src/storage';
+import { font, useTheme, type Palette, type ThemePref } from './src/theme';
 import { useVoice, type Phase } from './src/useVoice';
 
 const SUGGESTIONS: { text: string; route: Route; note: string }[] = [
@@ -52,11 +55,15 @@ export default function App() {
 }
 
 function Screen() {
-  const c = usePalette();
+  const { c, scheme, pref: themePref, cycle: cycleTheme } = useTheme();
   const s = useMemo(() => styles(c), [c]);
   const insets = useSafeAreaInsets();
   const [locale, setLocale] = useState<Locale>('en-IN');
-  const [turns, setTurns] = useState<Turn[]>([]);
+  // Everything ever said (History pane); the screen shows what came after the last clear.
+  const [history, setHistory] = useState<Turn[]>([]);
+  const [clearedAt, setClearedAt] = useState(0);
+  const [showHistory, setShowHistory] = useState(false);
+  const turns = useMemo(() => history.filter((t) => t.at > clearedAt).slice(-40), [history, clearedAt]);
   const [typing, setTyping] = useState(false);
   const [draft, setDraft] = useState('');
   // Resolved once; awaited by cloud calls so an early question never goes out without it.
@@ -74,13 +81,14 @@ function Screen() {
     // Idempotent: dev builds run mount effects twice, so merge once and de-duplicate by id
     // (which also repairs any duplicates already saved).
     let cancelled = false;
-    loadTurns().then((stored) => {
+    loadHistory().then(({ turns: stored, clearedAt: storedClear }) => {
       if (cancelled || historyLoaded.current) return;
       historyLoaded.current = true;
-      setTurns((prev) => {
+      setClearedAt((prev) => Math.max(prev, storedClear));
+      setHistory((prev) => {
         const seen = new Set<string>();
-        const merged = [...stored, ...prev].filter((t) => !seen.has(t.id) && (seen.add(t.id), true)).slice(-40);
-        if (merged.length !== stored.length || prev.length) saveTurns(merged);
+        const merged = [...stored, ...prev].filter((t) => !seen.has(t.id) && (seen.add(t.id), true)).slice(-HISTORY_MAX);
+        if (merged.length !== stored.length || prev.length) saveHistory(merged);
         return merged;
       });
     });
@@ -90,12 +98,37 @@ function Screen() {
   }, []);
 
   const push = useCallback((t: Turn) => {
-    setTurns((prev) => {
-      const next = [...prev, t];
-      if (historyLoaded.current) saveTurns(next);
+    setHistory((prev) => {
+      const next = [...prev, t].slice(-HISTORY_MAX);
+      if (historyLoaded.current) saveHistory(next);
       return next;
     });
   }, []);
+
+  // A fresh screen; history keeps every turn.
+  const clearScreen = useCallback(() => {
+    const at = Date.now();
+    setClearedAt(at);
+    saveClearedAt(at);
+  }, []);
+
+  const clearHistory = useCallback(() => {
+    Alert.alert(
+      locale === 'hi-IN' ? 'इतिहास मिटाएँ?' : 'Clear history?',
+      locale === 'hi-IN' ? 'इस फ़ोन से सारी पिछली बातचीत हट जाएगी।' : 'This removes every past conversation from this phone.',
+      [
+        { text: locale === 'hi-IN' ? 'रद्द करें' : 'Cancel', style: 'cancel' },
+        {
+          text: locale === 'hi-IN' ? 'मिटाएँ' : 'Clear',
+          style: 'destructive',
+          onPress: () => {
+            setHistory([]);
+            saveHistory([]);
+          },
+        },
+      ],
+    );
+  }, [locale]);
 
   // `handle` needs voice.speak and voice needs `handle`; break the cycle with a ref.
   const handleRef = useRef<(text: string) => void>(() => {});
@@ -106,11 +139,11 @@ function Screen() {
       const intent = route(said);
       voice.setInterim('');
       voice.silence(); // a new command interrupts whatever is still being spoken
+      voice.setHint(null); // and clears a stale "didn't catch that"
 
       if (intent.kind === 'stop') return voice.hush();
       if (intent.kind === 'clear') {
-        setTurns([]);
-        saveTurns([]);
+        clearScreen();
         return voice.speak(locale === 'hi-IN' ? 'साफ़ कर दिया।' : 'Cleared.', locale);
       }
 
@@ -158,7 +191,7 @@ function Screen() {
         voice.speak(msg, locale);
       }
     },
-    [locale, push, voice],
+    [locale, push, voice, clearScreen],
   );
   useEffect(() => {
     handleRef.current = handle;
@@ -180,11 +213,23 @@ function Screen() {
 
   return (
     <View style={[s.root, { paddingTop: insets.top }]}>
-      <StatusBar style="auto" />
+      <StatusBar style={scheme === 'dark' ? 'light' : 'dark'} />
       <KeyboardAvoidingView style={s.flex} behavior="padding">
         <View style={s.header}>
           <Text style={s.wordmark}>vaani</Text>
-          <LocaleToggle value={locale} onChange={setLocale} c={c} s={s} />
+          <View style={s.headerRight}>
+            <Pressable
+              onPress={() => setShowHistory(true)}
+              hitSlop={8}
+              accessibilityRole="button"
+              accessibilityLabel="History"
+              style={({ pressed }) => [s.headerBtn, pressed && { opacity: 0.6 }]}
+            >
+              <Feather name="clock" size={15} color={c.ink} />
+            </Pressable>
+            <ThemeButton pref={themePref} onPress={cycleTheme} c={c} s={s} />
+            <LocaleToggle value={locale} onChange={setLocale} c={c} s={s} />
+          </View>
         </View>
 
         <ScrollView
@@ -237,10 +282,7 @@ function Screen() {
             <IconButton
               name="rotate-ccw"
               label="Clear conversation"
-              onPress={() => {
-                setTurns([]);
-                saveTurns([]);
-              }}
+              onPress={clearScreen}
               disabled={turns.length === 0}
               c={c}
               s={s}
@@ -248,6 +290,20 @@ function Screen() {
           </View>
         </View>
       </KeyboardAvoidingView>
+
+      <HistoryPane
+        visible={showHistory}
+        history={history}
+        locale={locale}
+        onClose={() => setShowHistory(false)}
+        onAskAgain={(said) => {
+          setShowHistory(false);
+          handle(said);
+        }}
+        onClearHistory={clearHistory}
+        c={c}
+        s={s}
+      />
     </View>
   );
 }
@@ -262,6 +318,111 @@ function statusLine(phase: Phase, interim: string, hint: string | null, locale: 
 // ---- pieces ---------------------------------------------------------------
 
 type SP = { s: ReturnType<typeof styles>; c: Palette };
+
+function dayLabel(at: number, locale: Locale) {
+  const d = new Date(at);
+  const today = new Date();
+  const yesterday = new Date(today.getFullYear(), today.getMonth(), today.getDate() - 1);
+  const same = (a: Date, b: Date) => a.toDateString() === b.toDateString();
+  if (same(d, today)) return locale === 'hi-IN' ? 'आज' : 'TODAY';
+  if (same(d, yesterday)) return locale === 'hi-IN' ? 'कल' : 'YESTERDAY';
+  return d.toLocaleDateString(locale, { weekday: 'short', day: 'numeric', month: 'short' }).toUpperCase();
+}
+
+// Everything asked on this phone, newest first, grouped by day. An overlay, so the app
+// stays a single screen. Tap a row to ask it again.
+function HistoryPane({
+  visible,
+  history,
+  locale,
+  onClose,
+  onAskAgain,
+  onClearHistory,
+  s,
+  c,
+}: SP & {
+  visible: boolean;
+  history: Turn[];
+  locale: Locale;
+  onClose: () => void;
+  onAskAgain: (said: string) => void;
+  onClearHistory: () => void;
+}) {
+  const insets = useSafeAreaInsets();
+  const sections = useMemo(() => {
+    const out: { title: string; data: Turn[] }[] = [];
+    for (const t of [...history].reverse()) {
+      const title = dayLabel(t.at, locale);
+      if (out.at(-1)?.title !== title) out.push({ title, data: [] });
+      out.at(-1)!.data.push(t);
+    }
+    return out;
+  }, [history, locale]);
+
+  return (
+    <Modal visible={visible} animationType="slide" onRequestClose={onClose} statusBarTranslucent>
+      <View style={[s.sheet, { paddingTop: insets.top }]}>
+        <View style={s.sheetHeader}>
+          <Text style={s.sheetTitle}>{locale === 'hi-IN' ? 'इतिहास' : 'History'}</Text>
+          <Pressable onPress={onClose} hitSlop={8} accessibilityRole="button" accessibilityLabel="Close history" style={s.headerBtn}>
+            <Feather name="x" size={16} color={c.ink} />
+          </Pressable>
+        </View>
+        <SectionList
+          sections={sections}
+          keyExtractor={(t) => t.id}
+          contentContainerStyle={s.sheetList}
+          stickySectionHeadersEnabled
+          renderSectionHeader={({ section }) => <Text style={s.dayLabel}>{section.title}</Text>}
+          ListEmptyComponent={<Text style={s.sheetEmpty}>{locale === 'hi-IN' ? 'अभी कोई इतिहास नहीं।' : 'Nothing here yet.'}</Text>}
+          renderItem={({ item: t }) => (
+            <Pressable
+              onPress={() => onAskAgain(t.said)}
+              accessibilityRole="button"
+              accessibilityHint="Asks this again"
+              style={({ pressed }) => [s.historyRow, pressed && { opacity: 0.6 }]}
+            >
+              <Text style={s.historySaid} numberOfLines={2}>
+                {t.said}
+              </Text>
+              <Text style={s.historyReply} numberOfLines={2}>
+                {t.reply}
+              </Text>
+              <View style={[s.metaRow, { marginTop: 0 }]}>
+                <RouteTag route={t.route} label={routeLabel(t)} c={c} s={s} />
+                <Text style={s.time}>{new Date(t.at).toLocaleTimeString('en-IN', { hour: 'numeric', minute: '2-digit' })}</Text>
+              </View>
+            </Pressable>
+          )}
+        />
+        {history.length > 0 && (
+          <View style={[s.sheetFooter, { paddingBottom: insets.bottom + 12 }]}>
+            <Pressable onPress={onClearHistory} hitSlop={8} accessibilityRole="button">
+              <Text style={s.clearHistory}>{locale === 'hi-IN' ? 'इतिहास मिटाएँ' : 'Clear history'}</Text>
+            </Pressable>
+          </View>
+        )}
+      </View>
+    </Modal>
+  );
+}
+
+const THEME_ICON: Record<ThemePref, keyof typeof Feather.glyphMap> = { system: 'smartphone', light: 'sun', dark: 'moon' };
+const THEME_NAME: Record<ThemePref, string> = { system: 'System', light: 'Light', dark: 'Dark' };
+
+function ThemeButton({ pref, onPress, s, c }: SP & { pref: ThemePref; onPress: () => void }) {
+  return (
+    <Pressable
+      onPress={onPress}
+      hitSlop={8}
+      accessibilityRole="button"
+      accessibilityLabel={`Theme: ${THEME_NAME[pref]}. Tap to change.`}
+      style={({ pressed }) => [s.headerBtn, pressed && { opacity: 0.6 }]}
+    >
+      <Feather name={THEME_ICON[pref]} size={15} color={c.ink} />
+    </Pressable>
+  );
+}
 
 function LocaleToggle({ value, onChange, s }: SP & { value: Locale; onChange: (l: Locale) => void }) {
   const opts: [Locale, string][] = [
@@ -311,19 +472,20 @@ function RouteTag({ route: r, label, c, s }: SP & { route: Route; label: string 
   );
 }
 
+// Where an answer was computed, as shown under it: "on-device · alarm", "cache · edge"…
+function routeLabel(t: Turn) {
+  if (t.route === 'device') return `on-device · ${t.detail}`;
+  if (t.route === 'cache') return `cache · ${t.detail === 'phone' ? 'phone' : 'edge'}`;
+  if (t.route === 'cloud') return `cloud · ${t.detail}`;
+  return 'not answered';
+}
+
 function TurnView({ t, s, c, last }: SP & { t: Turn; last: boolean }) {
   const [fade] = useState(() => new Animated.Value(last ? 0 : 1));
   useEffect(() => {
     Animated.timing(fade, { toValue: 1, duration: 220, easing: Easing.out(Easing.quad), useNativeDriver: true }).start();
   }, [fade]);
-  const where =
-    t.route === 'device'
-      ? `on-device · ${t.detail}`
-      : t.route === 'cache'
-        ? `cache · ${t.detail === 'phone' ? 'phone' : 'edge'}`
-        : t.route === 'cloud'
-          ? `cloud · ${t.detail}`
-          : 'not answered';
+  const where = routeLabel(t);
   const time = new Date(t.at).toLocaleTimeString('en-IN', { hour: 'numeric', minute: '2-digit' });
   return (
     <Animated.View
@@ -429,6 +591,20 @@ const styles = (c: Palette) =>
       paddingBottom: 12,
     },
     wordmark: { fontFamily: font.semibold, fontSize: 22, color: c.ink, letterSpacing: -0.6 },
+    headerRight: { flexDirection: 'row', alignItems: 'center', gap: 10 },
+    headerBtn: { width: 35, height: 35, borderRadius: 18, borderWidth: 1, borderColor: c.line, alignItems: 'center', justifyContent: 'center' },
+
+    sheet: { flex: 1, backgroundColor: c.bg },
+    sheetHeader: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', paddingHorizontal: 24, paddingTop: 16, paddingBottom: 12 },
+    sheetTitle: { fontFamily: font.semibold, fontSize: 22, color: c.ink, letterSpacing: -0.6 },
+    sheetList: { paddingHorizontal: 24, paddingBottom: 24 },
+    dayLabel: { fontFamily: font.monoMedium, fontSize: 11, letterSpacing: 1.2, color: c.faint, paddingTop: 20, paddingBottom: 4, backgroundColor: c.bg },
+    historyRow: { paddingVertical: 14, borderBottomWidth: StyleSheet.hairlineWidth, borderBottomColor: c.line },
+    historySaid: { fontFamily: font.medium, fontSize: 16, color: c.ink, marginBottom: 4 },
+    historyReply: { fontFamily: font.regular, fontSize: 14, lineHeight: 20, color: c.muted, marginBottom: 8 },
+    sheetFooter: { borderTopWidth: StyleSheet.hairlineWidth, borderTopColor: c.line, paddingHorizontal: 24, paddingTop: 12, alignItems: 'center' },
+    clearHistory: { fontFamily: font.medium, fontSize: 14, color: c.error, paddingVertical: 10 },
+    sheetEmpty: { fontFamily: font.regular, fontSize: 15, color: c.muted, textAlign: 'center', marginTop: 80 },
     toggle: { flexDirection: 'row', borderWidth: 1, borderColor: c.line, borderRadius: 999, padding: 3 },
     toggleItem: { paddingHorizontal: 12, paddingVertical: 5, borderRadius: 999 },
     toggleOn: { backgroundColor: c.ink },

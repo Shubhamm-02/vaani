@@ -10,6 +10,7 @@ const TRAILING_FILLER = /\s+(?:please|thanks|thank you|batao|bataiye|bata do|na|
 
 const CONTRACTIONS = [
   [/\b(what|who|where|how|when|why|that|it|there)'s\b/g, '$1 is'],
+  [/\b(what|who|where|when|why)s\b/g, '$1 is'], // typed without the apostrophe: "whats\"
   [/\b(what|who|where|how|when|why)'re\b/g, '$1 are'],
 ];
 
@@ -67,11 +68,15 @@ const FOLLOW_UP_WHOLE =
 /**
  * @param {string} normalized
  * @param {boolean} [inConversation] the app sent recent turns: very short questions
- *   then usually lean on them ("population kitni hai", "who is the ceo").
+ *   then usually lean on them ("population kitni hai", "who is the CEO").
+ * @param {string} [raw] the query as transcribed. Recognisers capitalise proper nouns, so
+ *   a Titlecase word after the first ("who wrote Gitanjali") names its own subject.
+ *   All-caps acronyms ("CEO") do not count.
  */
-export function isFollowUp(normalized, inConversation = false) {
+export function isFollowUp(normalized, inConversation = false, raw = '') {
   if (ANAPHORA.test(normalized) || FOLLOW_UP_START.test(normalized) || FOLLOW_UP_WHOLE.test(normalized)) return true;
   if (!inConversation || normalized.split(' ').length > 3) return false;
+  if (raw.trim().split(/\s+/).slice(1).some((w) => /^[A-Z][a-z]/.test(w))) return false;
   // Short but self-contained: definitions ("what is upi", "upi kya hai") and anything
   // naming its object ("capital of france", "google ka ceo"). The rest leans on context.
   return !/^(?:what is|what are|define|meaning of) \S+$|^\S+ (?:kya hai|kya hota hai|meaning)$|\S+ (?:of|ka|ki|ke|का|की|के) \S+/u.test(normalized);

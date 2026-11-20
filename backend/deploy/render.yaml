@@ -10,6 +10,8 @@ services:
     startCommand: node src/node.js
     healthCheckPath: /healthz
     envVars:
+      - key: TRUST_PROXY # Render's proxy sets X-Forwarded-For
+        value: "1"
       - key: GROQ_API_KEY
         sync: false
       - key: OPENROUTER_API_KEY

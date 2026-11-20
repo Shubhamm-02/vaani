@@ -6,16 +6,30 @@
 
 const LEADING_FILLER =
   /^(?:(?:hey|hi|hello|ok|okay|so|um|uh)\s+)*(?:(?:vaani|vani|assistant)\s+)?(?:(?:please|can you|could you|would you|will you|tell me|explain|say|batao|bataiye|mujhe)\s+)*/u;
-const TRAILING_FILLER = /\s+(?:please|thanks|thank you|batao|bataiye|na)$/u;
+const TRAILING_FILLER = /\s+(?:please|thanks|thank you|batao|bataiye|bata do|na|बताओ|बताइए|बता दो|बताना)$/u;
 
 const CONTRACTIONS = [
   [/\b(what|who|where|how|when|why|that|it|there)'s\b/g, '$1 is'],
   [/\b(what|who|where|how|when|why)'re\b/g, '$1 are'],
 ];
 
+// Symbols that change meaning must survive punctuation stripping as words:
+// "c++" vs "c", "o+" vs "o-" blood, "-40" vs "40".
+const SYMBOLS = [
+  [/\+/g, ' plus '],
+  [/#/g, ' sharp '],
+  [/(^|[\s(])-(?=\d)/g, '$1 minus '],
+  [/(\p{L})-(?=\s|$)/gu, '$1 minus '],
+  [/\^/g, ' power '],
+  [/\*/g, ' times '],
+  [/(\d)\s*\/\s*(?=\d)/g, '$1 by '],
+  [/%/g, ' percent '],
+];
+
 export function normalize(query) {
   let s = String(query).normalize('NFKC').toLowerCase().replace(/[’‘]/g, "'");
   for (const [re, to] of CONTRACTIONS) s = s.replace(re, to);
+  for (const [re, to] of SYMBOLS) s = s.replace(re, to);
   return s
     .replace(/[^\p{L}\p{N}\p{M}\s]/gu, ' ') // drop punctuation, keep Devanagari marks
     .replace(/\s+/g, ' ')
@@ -29,8 +43,11 @@ export function normalize(query) {
 }
 
 // Answers that depend on "now" must not be served from a cache.
+// Generous on purpose: a false positive costs one cache miss, a false negative serves
+// a stale "now" answer for days. Devanagari words get explicit word boundaries (\b is
+// ASCII-only), so "कला" and "आज़ादी" are not mistaken for "कल" and "आज".
 const TIME_SENSITIVE =
-  /\b(?:today|tonight|now|current|currently|latest|recent|news|weather|temperature|score|live|price|stock|rate|tomorrow|yesterday|this week|this year|aaj|abhi|kal)\b|आज|अभी|कल/u;
+  /\b(?:today|tonight|now|current|currently|latest|recent|news|weather|temperature|forecast|rain|hot|cold|score|scores|match|won|win|winner|result|results|election|live|price|prices|stock|stocks|share price|market|sensex|nifty|rate|rates|dollar|rupee|exchange|bhav|bhaav|mausam|time|date|day|tomorrow|yesterday|this week|this month|this year|aaj|abhi|kal|baj|baje)\b|(?:^|\s)(?:आज|अभी|कल|मौसम|टाइम|समय|तारीख|बजे|भाव|दाम|स्कोर|मैच)(?=\s|$)/u;
 
 export function isTimeSensitive(normalized) {
   return TIME_SENSITIVE.test(normalized);
@@ -45,14 +62,35 @@ const ANAPHORA =
 // (\b is ASCII-only in JS regexes, so Devanagari words need an explicit space/end check.)
 const FOLLOW_UP_START = /^(?:what about|how about|and|but|so|also|then|aur|toh|to|phir|lekin|par)\b|^(?:और|तो|फिर|लेकिन)(?:\s|$)/u;
 const FOLLOW_UP_WHOLE =
-  /^(?:why|why not|how|really|what|who|when|where|kyun|kaise|kab|more|again|repeat|elaborate|tell me more|explain more|in (?:hindi|english|short|detail)|translate|simpler|shorter|example|for example)$/u;
+  /^(?:why|why not|why so|how|how so|really|what|who|when|where|kyun|kyon|kaise|kab|kahan|more|again|repeat|elaborate|tell me more|explain more|in (?:hindi|english|short|detail|simple words)|(?:hindi|english|short|detail|simple|simple words) (?:mein|me|में)|translate|simpler|shorter|example|for example|क्यों|कैसे|कब|कहाँ|और|फिर|मतलब|हिंदी में|अंग्रेज़ी में|और बताओ)$/u;
 
-export function isFollowUp(normalized) {
-  return ANAPHORA.test(normalized) || FOLLOW_UP_START.test(normalized) || FOLLOW_UP_WHOLE.test(normalized);
+/**
+ * @param {string} normalized
+ * @param {boolean} [inConversation] the app sent recent turns: very short questions
+ *   then usually lean on them ("population kitni hai", "who is the ceo").
+ */
+export function isFollowUp(normalized, inConversation = false) {
+  if (ANAPHORA.test(normalized) || FOLLOW_UP_START.test(normalized) || FOLLOW_UP_WHOLE.test(normalized)) return true;
+  if (!inConversation || normalized.split(' ').length > 3) return false;
+  // Short but self-contained: definitions ("what is upi", "upi kya hai") and anything
+  // naming its object ("capital of france", "google ka ceo"). The rest leans on context.
+  return !/^(?:what is|what are|define|meaning of) \S+$|^\S+ (?:kya hai|kya hota hai|meaning)$|\S+ (?:of|ka|ki|ke|का|की|के) \S+/u.test(normalized);
 }
 
 export async function hashKey(text) {
   const bytes = new TextEncoder().encode(text);
   const digest = await crypto.subtle.digest('SHA-256', bytes);
   return [...new Uint8Array(digest)].map((b) => b.toString(16).padStart(2, '0')).join('');
+}
+
+// A command for the phone ("10 baje ka alarm lagao", "mummy ko message bhejo") that the
+// on-device router could not handle. The LLM cannot act, and small models will happily
+// say "Sure, setting an alarm" anyway, so these never reach it.
+const COMMAND_OBJECT =
+  /\b(?:alarm|timer|reminder|remind me|message|sms|text|call|dial|whatsapp)\b|अलार्म|टाइमर|रिमाइंडर|मैसेज|संदेश|कॉल|फोन/u;
+const COMMAND_VERB =
+  /^(?:set|start|send|call|dial|text|remind me)\b|\b(?:lagao|laga do|lagado|set karo|set kar do|bhejo|bhej do|karo|kar do|remind me)$|लगाओ|लगा दो|भेजो|भेज दो|करो$|कर दो$/u;
+
+export function isDeviceCommand(normalized) {
+  return COMMAND_OBJECT.test(normalized) && COMMAND_VERB.test(normalized);
 }

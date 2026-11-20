@@ -2,7 +2,7 @@
 
 A single-screen Android voice assistant (React Native / Expo SDK 58) with a stateless Node.js backend (Hono) that runs on Cloudflare Workers. It is designed for 10 lakh (1 million) concurrent users and demonstrated entirely on free tiers.
 
-**Design report:** [docs/DESIGN.md](docs/DESIGN.md) covers constraints, decisions and trade-offs, the caching design, a capacity model for 10 lakh concurrent users, a cost model and measured numbers.
+**Design report:** [docs/DESIGN.md](docs/DESIGN.md) covers constraints, decisions and trade-offs, the caching design, a capacity model for 10 lakh concurrent users, a cost model, measured numbers and [known limitations](docs/DESIGN.md#13-known-limitations).
 
 | Light | Conversation | Dark |
 |---|---|---|
@@ -10,7 +10,7 @@ A single-screen Android voice assistant (React Native / Expo SDK 58) with a stat
 
 ## How a command flows
 
-1. **Speech to text on the phone.** Android `SpeechRecognizer` runs with `EXTRA_PREFER_OFFLINE`, so audio never reaches our servers.
+1. **Speech to text on the phone.** Android `SpeechRecognizer` tries offline recognition first and falls back to the phone's online recogniser if the language pack isn't downloaded. Either way, audio never reaches our servers.
 2. **On-device intent router** (`app/src/intents.ts`). It handles timers, alarms, calls, opening apps, search, directions, time, date, battery and maths locally, in English, Hinglish and Hindi. These commands need no network and cost nothing.
 3. **Phone answer cache.** If this phone has asked the question before, the answer is spoken instantly, even offline.
 4. **Cloud only for new open questions.** The phone sends text only (about 100 bytes) to `POST /v1/ask`. The server:
@@ -31,7 +31,7 @@ cd backend
 npm install
 cp .env.example .env      # add a free Groq key; with none it runs in demo (mock) mode
 npm run dev               # http://localhost:8787
-npm test                  # 22 tests
+npm test                  # 28 tests
 npm run bench             # load test on one process (mock LLM)
 ```
 
@@ -60,7 +60,7 @@ Speech recognition is a native module, so the app needs a development build. Exp
 ```bash
 cd app
 npm install
-npm test                  # 25 tests: intent router + phone cache keys
+npm test                  # 42 tests: intent router (English, Hinglish, Hindi) + phone cache keys
 ```
 
 Then build it one of two ways.

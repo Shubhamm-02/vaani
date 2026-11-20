@@ -7,8 +7,8 @@ import { bodyLimit } from 'hono/body-limit';
 import { KvStore, TieredCache, UpstashStore } from './cache.js';
 import { CACHE_VERSION } from './config.js';
 import { SingleFlight, TokenBucket } from './guards.js';
-import { AllProvidersFailed, ProviderChain, buildMessages } from './llm.js';
-import { hashKey, isFollowUp, isTimeSensitive, normalize } from './normalize.js';
+import { AllProvidersFailed, CANT_ACT, ProviderChain, buildMessages, claimsAction } from './llm.js';
+import { hashKey, isDeviceCommand, isFollowUp, isTimeSensitive, normalize } from './normalize.js';
 
 const LOCALES = new Set(['en-IN', 'hi-IN']);
 const DEVICE_ID = /^[A-Za-z0-9-]{8,64}$/;
@@ -27,8 +27,8 @@ function validate(body) {
   return null;
 }
 
-function clientIp(c) {
-  const xff = c.req.header('x-forwarded-for');
+function clientIp(c, trustProxy) {
+  const xff = trustProxy ? c.req.header('x-forwarded-for') : null;
   return (
     c.req.header('cf-connecting-ip') ||
     (xff && xff.split(',')[0].trim()) ||
@@ -56,12 +56,12 @@ export function createApp(resolveConfig, { fetchImpl } = {}) {
     const l2 = cfg.kv ? new KvStore(cfg.kv) : cfg.upstash ? new UpstashStore(cfg.upstash, f) : null;
     state = {
       cfg,
-      chain: new ProviderChain(cfg.providers, { timeoutMs: cfg.llmTimeoutMs, fetchImpl: f }),
+      chain: new ProviderChain(cfg.providers, { timeoutMs: cfg.llmTimeoutMs, budgetMs: cfg.llmBudgetMs, fetchImpl: f }),
       cache: new TieredCache({ maxEntries: cfg.cacheMaxEntries, l2 }),
       perDevice: new TokenBucket({ perMinute: cfg.rate.perDevicePerMin }),
       perIp: new TokenBucket({ perMinute: cfg.rate.perIpPerMin }),
       flights: new SingleFlight(),
-      m: { requests: 0, followUps: 0, llmCalls: 0, coalesced: 0, rateLimited: 0, upstreamFailures: 0, startedAt: Date.now() },
+      m: { requests: 0, followUps: 0, deviceCommands: 0, claimedActions: 0, llmCalls: 0, coalesced: 0, rateLimited: 0, upstreamFailures: 0, startedAt: Date.now() },
     };
     return state;
   };
@@ -88,7 +88,8 @@ export function createApp(resolveConfig, { fetchImpl } = {}) {
 
   app.post(
     '/v1/ask',
-    bodyLimit({ maxSize: 8 * 1024, onError: (c) => c.json({ error: 'payload_too_large' }, 413) }),
+    // 6 history turns x 800 chars of Devanagari (3 bytes each) needs ~15 KB.
+    bodyLimit({ maxSize: 16 * 1024, onError: (c) => c.json({ error: 'payload_too_large' }, 413) }),
     async (c) => {
       const t0 = Date.now();
       const s = init(c);
@@ -102,7 +103,7 @@ export function createApp(resolveConfig, { fetchImpl } = {}) {
 
       for (const [bucket, key] of [
         [s.perDevice, deviceId],
-        [s.perIp, clientIp(c)],
+        [s.perIp, clientIp(c, s.cfg.trustProxy)],
       ]) {
         const r = bucket.take(key);
         if (!r.ok) {
@@ -125,11 +126,17 @@ export function createApp(resolveConfig, { fetchImpl } = {}) {
       const locale = body.locale || 'en-IN';
       const norm = normalize(query);
 
+      // A phone command the device could not parse: answer honestly without an LLM call.
+      if (isDeviceCommand(norm)) {
+        s.m.deviceCommands++;
+        return c.json({ answer: CANT_ACT[locale], source: 'llm', provider: 'guard', cacheTtlSec: 0, latencyMs: Date.now() - t0 });
+      }
+
       // The app sends recent turns with every question. Only a real follow-up
       // ("who runs it", "in hindi") needs them; for anything else history would just
       // cost tokens and make a shareable answer uncacheable. Decided here, not on the
       // phone, so the policy can change without shipping a new APK.
-      const followUp = isFollowUp(norm);
+      const followUp = isFollowUp(norm, (body.history || []).length > 0);
       if (followUp) s.m.followUps++;
       const history = followUp ? body.history || [] : [];
       const cacheable = !followUp && norm.length > 0 && !isTimeSensitive(norm);
@@ -144,7 +151,9 @@ export function createApp(resolveConfig, { fetchImpl } = {}) {
             source: 'cache',
             tier: hit.tier,
             provider: hit.value.provider,
-            cacheTtlSec: ttl,
+            // What is left of the entry's life, so a phone never keeps it past expiry.
+            cacheTtlSec: hit.value.exp ? Math.max(0, Math.floor((hit.value.exp - Date.now()) / 1000)) : 0,
+            cacheVersion: CACHE_VERSION,
             latencyMs: Date.now() - t0,
           });
         }
@@ -156,7 +165,15 @@ export function createApp(resolveConfig, { fetchImpl } = {}) {
         const ask = async () => {
           s.m.llmCalls++;
           const out = await s.chain.complete(buildMessages(query, history, locale));
-          if (key) background(c, s.cache.set(key, { text: out.text, provider: out.provider }, ttl));
+          // Second line of defence: a model that claims it set an alarm or sent a message
+          // is replaced by the honest answer, and that answer is not cached.
+          if (claimsAction(out.text)) {
+            s.m.claimedActions++;
+            return { ...out, text: CANT_ACT[locale], uncacheable: true };
+          }
+          // Demo answers and answers cut off by max_tokens are spoken but never shared.
+          if (out.provider === 'mock' || out.truncated) return { ...out, uncacheable: true };
+          if (key) background(c, s.cache.set(key, { text: out.text, provider: out.provider, exp: Date.now() + ttl * 1000 }, ttl));
           return out;
         };
         const out = key ? await s.flights.run(key, ask, () => s.m.coalesced++) : await ask();
@@ -165,7 +182,8 @@ export function createApp(resolveConfig, { fetchImpl } = {}) {
           source: 'llm',
           provider: out.provider,
           model: out.model,
-          cacheTtlSec: key ? ttl : 0, // tells the phone whether it may keep this answer
+          cacheTtlSec: key && !out.uncacheable ? ttl : 0, // tells the phone whether it may keep this answer
+          cacheVersion: CACHE_VERSION,
           latencyMs: Date.now() - t0,
         });
       } catch (err) {

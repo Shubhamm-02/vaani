@@ -21,6 +21,7 @@ spec:
           envFrom: [{ secretRef: { name: vaani-llm-keys } }]
           env:
             - { name: CACHE_MAX_ENTRIES, value: "50000" }
+            - { name: TRUST_PROXY, value: "1" } # behind the ingress, which sets X-Forwarded-For
             - { name: NODE_OPTIONS, value: "--max-old-space-size=768" }
           resources:
             requests: { cpu: "1", memory: 512Mi }

@@ -11,6 +11,10 @@ const MAX_ENTRIES = 300; // ~300 short answers ≈ 60 KB of AsyncStorage
 
 type Entry = { a: string; p?: string; exp: number };
 let mem: Map<string, Entry> | null = null;
+// The server's cache version. When it changes (new prompt or normaliser), every answer
+// kept on the phone is from the old version and is dropped.
+const VERSION_KEY = 'vaani.answers.version';
+let version: string | null | undefined;
 
 async function load(): Promise<Map<string, Entry>> {
   if (mem) return mem;
@@ -46,9 +50,18 @@ export async function getCached(query: string, locale: Locale): Promise<{ answer
   return { answer: e.a, provider: e.p };
 }
 
-export async function putCached(query: string, locale: Locale, answer: string, ttlSec: number, provider?: string) {
-  if (!(ttlSec > 0) || !answer) return;
+export async function putCached(query: string, locale: Locale, answer: string, ttlSec: number, provider?: string, serverVersion?: string) {
   const m = await load();
+  if (serverVersion) {
+    if (version === undefined) version = await AsyncStorage.getItem(VERSION_KEY).catch(() => null);
+    if (version !== serverVersion) {
+      m.clear();
+      version = serverVersion;
+      AsyncStorage.setItem(VERSION_KEY, serverVersion).catch(() => {});
+      persist(m);
+    }
+  }
+  if (!(ttlSec > 0) || !answer) return;
   const k = cacheKey(query, locale);
   m.delete(k);
   m.set(k, { a: answer, p: provider, exp: Date.now() + ttlSec * 1000 });

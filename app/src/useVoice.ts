@@ -1,6 +1,8 @@
 // Speech in and speech out, both on the phone.
-// STT: Android SpeechRecognizer with EXTRA_PREFER_OFFLINE, so it runs on-device
-// whenever the language pack is installed and silently falls back otherwise.
+// STT: Android SpeechRecognizer. We ask for offline recognition first (private, free,
+// works without data). Many phones ship the recogniser without the offline model for
+// en-IN / hi-IN, and Android then fails with "language not downloaded" instead of
+// falling back by itself, so we retry online once and remember that for the session.
 // TTS: the system engine via expo-speech. Neither costs us a rupee per request.
 import * as Speech from 'expo-speech';
 import { ExpoSpeechRecognitionModule, useSpeechRecognitionEvent } from 'expo-speech-recognition';
@@ -10,6 +12,24 @@ import type { Locale } from './actions';
 
 export type Phase = 'idle' | 'listening' | 'thinking' | 'speaking';
 
+// Locales whose offline model is missing on this phone (per app session).
+const onlineOnly = new Set<Locale>();
+
+function startRecognizer(locale: Locale) {
+  ExpoSpeechRecognitionModule.start({
+    lang: locale,
+    interimResults: true,
+    continuous: false,
+    maxAlternatives: 1,
+    contextualStrings: ['Vaani', 'timer', 'alarm', 'WhatsApp', 'YouTube'],
+    volumeChangeEventOptions: { enabled: true, intervalMillis: 80 },
+    androidIntentOptions: {
+      EXTRA_PREFER_OFFLINE: !onlineOnly.has(locale),
+      EXTRA_SPEECH_INPUT_COMPLETE_SILENCE_LENGTH_MILLIS: 1200,
+    },
+  });
+}
+
 export function useVoice(onFinal: (text: string) => void) {
   const [phase, setPhase] = useState<Phase>('idle');
   const [interim, setInterim] = useState('');
@@ -17,6 +37,8 @@ export function useVoice(onFinal: (text: string) => void) {
   const [level] = useState(() => new Animated.Value(0));
   const delivered = useRef(false);
   const latest = useRef('');
+  const locale = useRef<Locale>('en-IN');
+  const retrying = useRef(false);
 
   useSpeechRecognitionEvent('start', () => {
     delivered.current = false;
@@ -38,6 +60,7 @@ export function useVoice(onFinal: (text: string) => void) {
 
   useSpeechRecognitionEvent('end', () => {
     level.setValue(0);
+    if (retrying.current) return; // an online retry is about to start
     // Some recognisers end without flagging a final result; use the last partial.
     if (!delivered.current && latest.current) {
       delivered.current = true;
@@ -49,15 +72,30 @@ export function useVoice(onFinal: (text: string) => void) {
 
   useSpeechRecognitionEvent('error', (e) => {
     level.setValue(0);
+    const loc = locale.current;
+    // Offline model not downloaded (or offline not offered): retry online, once.
+    if (e.error === 'language-not-supported' && !onlineOnly.has(loc)) {
+      onlineOnly.add(loc);
+      retrying.current = true;
+      setTimeout(() => {
+        retrying.current = false;
+        startRecognizer(loc);
+      }, 250); // let the failed session tear down first
+      return;
+    }
     setPhase('idle');
     if (e.error === 'no-speech' || e.error === 'speech-timeout' || e.error === 'aborted') {
       setHint("Didn't catch that. Tap and try again.");
     } else if (e.error === 'not-allowed') {
       setHint('Microphone permission is off. Enable it in Settings.');
     } else if (e.error === 'language-not-supported') {
-      setHint('This language pack is not installed on the phone.');
+      setHint(
+        loc === 'hi-IN'
+          ? 'Hindi speech is not available on this phone. Update "Speech Recognition & Synthesis by Google" from the Play Store.'
+          : 'Speech recognition is not available on this phone. Update "Speech Recognition & Synthesis by Google" from the Play Store.',
+      );
     } else if (e.error === 'network') {
-      setHint('Speech needs a network for this language. Download the offline pack in Google settings.');
+      setHint('No internet, and the offline speech pack is not downloaded. Typing still works.');
     } else {
       setHint(e.message || 'Speech recognition failed.');
     }
@@ -68,44 +106,49 @@ export function useVoice(onFinal: (text: string) => void) {
     level.setValue(Math.max(0, Math.min(1, (e.value + 2) / 12)));
   });
 
-  const listen = useCallback(async (locale: Locale) => {
+  const listen = useCallback(async (lang: Locale) => {
     Speech.stop();
     const perm = await ExpoSpeechRecognitionModule.requestPermissionsAsync();
     if (!perm.granted) {
       setHint('Vaani needs the microphone to hear you.');
       return;
     }
-    ExpoSpeechRecognitionModule.start({
-      lang: locale,
-      interimResults: true,
-      continuous: false,
-      maxAlternatives: 1,
-      contextualStrings: ['Vaani', 'timer', 'alarm', 'WhatsApp', 'YouTube'],
-      volumeChangeEventOptions: { enabled: true, intervalMillis: 80 },
-      androidIntentOptions: {
-        EXTRA_PREFER_OFFLINE: true,
-        EXTRA_SPEECH_INPUT_COMPLETE_SILENCE_LENGTH_MILLIS: 1200,
-      },
-    });
+    locale.current = lang;
+    startRecognizer(lang);
   }, []);
 
   const stopListening = useCallback(() => ExpoSpeechRecognitionModule.stop(), []);
 
-  const speak = useCallback((text: string, locale: Locale) => {
+  // Each utterance gets an id. expo-speech fires onStopped/onDone asynchronously, so a
+  // late callback from an older utterance must not flip a newer request back to idle.
+  const utterance = useRef(0);
+
+  const speak = useCallback((text: string, lang: Locale) => {
     Speech.stop();
+    const id = ++utterance.current;
     if (!text) {
       setPhase('idle');
       return;
     }
     setPhase('speaking');
-    const done = () => setPhase('idle');
-    Speech.speak(text, { language: locale, rate: 1.02, onDone: done, onStopped: done, onError: done });
+    const done = () => {
+      if (utterance.current === id) setPhase('idle');
+    };
+    // Read Devanagari with the Hindi voice even in EN mode (typed Hindi, Hindi answers).
+    const language = /[ऀ-ॿ]/.test(text) ? 'hi-IN' : lang;
+    Speech.speak(text, { language, rate: 1.02, onDone: done, onStopped: done, onError: done });
+  }, []);
+
+  /** Stop talking without changing phase (the caller is about to set its own). */
+  const silence = useCallback(() => {
+    utterance.current++;
+    Speech.stop();
   }, []);
 
   const hush = useCallback(() => {
-    Speech.stop();
+    silence();
     setPhase('idle');
-  }, []);
+  }, [silence]);
 
-  return { phase, setPhase, interim, setInterim, hint, setHint, level, listen, stopListening, speak, hush };
+  return { phase, setPhase, interim, setInterim, hint, setHint, level, listen, stopListening, speak, silence, hush };
 }

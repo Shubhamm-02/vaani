@@ -5,7 +5,7 @@
 const num = (v, d) => (v === undefined || v === '' || Number.isNaN(Number(v)) ? d : Number(v));
 
 // Bump when the system prompt or normalisation changes: old cache entries become unreachable.
-export const CACHE_VERSION = 'a2';
+export const CACHE_VERSION = 'a3';
 
 const PROVIDERS = {
   // Primary. Groq's free tier is per organisation *per model*:
@@ -72,7 +72,8 @@ export function loadConfig(env = {}) {
 
   return {
     providers,
-    llmTimeoutMs: num(env.LLM_TIMEOUT_MS, 8000),
+    llmTimeoutMs: num(env.LLM_TIMEOUT_MS, 6000), // per provider attempt
+    llmBudgetMs: num(env.LLM_BUDGET_MS, 10_000), // whole chain; keep below the app's 15 s
     // Only evergreen, stand-alone questions are cached, so a long TTL is safe and
     // directly raises the hit rate. Time-sensitive questions never enter the cache.
     cacheTtlSec: num(env.CACHE_TTL_SEC, 7 * 86400),
@@ -87,5 +88,8 @@ export function loadConfig(env = {}) {
         ? { url: env.UPSTASH_REDIS_REST_URL, token: env.UPSTASH_REDIS_REST_TOKEN }
         : null,
     appToken: env.APP_TOKEN || null,
+    // Only trust X-Forwarded-For behind a proxy that sets it (Render, a k8s ingress).
+    // On Workers the client IP comes from cf-connecting-ip, which clients cannot forge.
+    trustProxy: env.TRUST_PROXY === '1',
   };
 }

@@ -33,11 +33,13 @@
           "microphonePermission": "Vaani listens only while you hold the conversation open.",
           "androidSpeechServicePackages": [
             "com.google.android.googlequicksearchbox",
+            "com.google.android.tts",
             "com.google.android.as"
           ]
         }
       ],
-      "expo-font"
+      "expo-font",
+      "./plugins/withLauncherQueries"
     ],
     "extra": {
       "eas": {

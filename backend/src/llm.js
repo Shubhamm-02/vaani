@@ -9,7 +9,22 @@ Rules:
 - Plain spoken language. No markdown, lists, emojis, URLs or code.
 - Reply in the user's language and script (English, Hindi, or Hinglish).
 - If the question needs live data you do not have (weather, news, prices, scores), say so in one sentence and suggest saying "search for" followed by the topic.
-- Never invent facts. If unsure, say so.`;
+- Never invent facts. If unsure, say so.
+- You only answer questions. You cannot act on the phone: you cannot set alarms or timers, make calls, send messages, open apps or change settings. Never say or imply that you did. If asked to, say you couldn't do it and suggest a simple phrasing the phone understands, such as "set an alarm for 7 am", "10 minute ka timer lagao", "call" followed by the number, or "open" followed by the app name.`;
+
+// Spoken when a phone action reaches the cloud, or when a model claims it acted.
+export const CANT_ACT = {
+  'en-IN': "I couldn't do that. I can set alarms and timers, call a number and open apps. Try saying: set an alarm for 7 am.",
+  'hi-IN': 'यह मैं नहीं कर पाई। मैं अलार्म, टाइमर, कॉल और ऐप खोल सकती हूँ। ऐसे बोलिए: सुबह 7 बजे का अलार्म लगाओ।',
+};
+
+// "Sure, setting an alarm…", "I've set…", "अलार्म लगा दिया" - the model claiming an action.
+const CLAIMED_ACTION =
+  /\b(?:i(?:'| ha)ve (?:set|sent|called|opened|scheduled|added)|i (?:set|sent|called|opened|scheduled)|(?:setting|sending|calling|opening|scheduling) (?:an? |the |your )?(?:alarm|timer|reminder|message|call|app)|(?:alarm|timer|reminder) (?:is |has been )?set\b)|लगा दिया|लगा दी|भेज दिया|सेट कर दिया|कॉल कर रही/iu;
+
+export function claimsAction(text) {
+  return CLAIMED_ACTION.test(text);
+}
 
 export class AllProvidersFailed extends Error {
   constructor(retryAfterSec, causes) {
@@ -40,6 +55,7 @@ export function buildMessages(query, history, locale) {
 export function cleanForSpeech(text) {
   return String(text || '')
     .replace(/<think>[\s\S]*?<\/think>/g, '')
+    .replace(/<think>[\s\S]*$/, '') // reasoning cut off by max_tokens: never speak it
     .replace(/https?:\/\/\S+/g, '')
     .replace(/```[\s\S]*?```/g, '')
     .replace(/[*_#`>|~]+/g, '')
@@ -52,9 +68,12 @@ export function cleanForSpeech(text) {
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
 export class ProviderChain {
-  constructor(providers, { timeoutMs = 8000, fetchImpl = (...a) => fetch(...a), now = Date.now } = {}) {
+  constructor(providers, { timeoutMs = 6000, budgetMs = 10_000, fetchImpl = (...a) => fetch(...a), now = Date.now } = {}) {
     this.providers = providers;
     this.timeoutMs = timeoutMs;
+    // One deadline for the whole chain, so the server always answers (even if only
+    // "busy, try again") before the app's own 15 s timeout fires.
+    this.budgetMs = budgetMs;
     this.fetch = fetchImpl;
     this.now = now;
     this.health = new Map(providers.map((p) => [p.name, { openUntil: 0, failures: 0 }]));
@@ -71,6 +90,7 @@ export class ProviderChain {
   async complete(messages) {
     const causes = [];
     let soonest = Infinity;
+    const deadline = this.now() + this.budgetMs;
     for (const p of this.providers) {
       const h = this.health.get(p.name);
       if (h.openUntil > this.now()) {
@@ -78,8 +98,13 @@ export class ProviderChain {
         causes.push(`${p.name}: cooling down`);
         continue;
       }
+      const left = deadline - this.now();
+      if (left < 500) {
+        causes.push(`${p.name}: no time left`);
+        break;
+      }
       try {
-        const out = await this.#call(p, messages);
+        const out = await this.#call(p, messages, Math.min(this.timeoutMs, left));
         h.failures = 0;
         h.lastError = null;
         return out;
@@ -109,7 +134,7 @@ export class ProviderChain {
     }
   }
 
-  async #call(p, messages) {
+  async #call(p, messages, timeoutMs = this.timeoutMs) {
     const started = this.now();
     if (p.mock) {
       await sleep(p.latencyMs);
@@ -136,7 +161,7 @@ export class ProviderChain {
         temperature: 0.3,
         ...p.extra,
       }),
-      signal: AbortSignal.timeout(this.timeoutMs),
+      signal: AbortSignal.timeout(timeoutMs),
     });
 
     if (!res.ok) {
@@ -158,6 +183,7 @@ export class ProviderChain {
       model: data.model || p.model, // OpenRouter may have served a fallback model
       upstreamMs: this.now() - started,
       tokens: data.usage?.total_tokens,
+      truncated: data?.choices?.[0]?.finish_reason === 'length', // spoken, but never cached
     };
   }
 }

@@ -2,7 +2,7 @@
 
 **Goal:** a single-screen Android voice assistant that can serve **10 lakh (1 million) concurrent users**, built and demonstrated entirely on **free tiers**.
 
-**Status:** working end to end. The backend runs on Cloudflare Workers with a shared KV cache. The Android app is built with EAS. 47 automated tests pass (22 backend, 25 app).
+**Status:** working end to end. The backend runs on Cloudflare Workers with a shared KV cache. The Android app is built with EAS. 70 automated tests pass (28 backend, 42 app).
 
 ---
 
@@ -72,16 +72,35 @@ flowchart LR
 
 ## 4. Tier 0: the phone
 
-**Speech.** STT and TTS are the system engines. This is the single biggest scaling decision: audio is the heaviest payload in a voice product, and it never reaches our servers. The trade-off is quality variance across devices and missing Hindi offline packs on some phones. The app detects `network` and `language-not-supported` errors and tells the user how to install the pack.
+**Speech.** STT and TTS are the system engines. This is the single biggest scaling decision: audio is the heaviest payload in a voice product, and it never reaches our servers. Recognition asks for the offline model first.
+
+Many phones ship the recogniser without the en-IN or hi-IN offline model. Testing on a Realme phone (Android 13) showed that Android then fails with "language not downloaded" instead of falling back by itself. The app therefore retries **online** once and remembers that choice for the session. Online recognition is done by the phone's recognition service (Google), so in that case audio leaves the phone, but it goes to Google, never to us. The trade-off is quality variance across devices and OEM recognisers.
 
 **Intent router** (`app/src/intents.ts`). A pure-TypeScript, rule-based router for English, Hinglish and Hindi:
 - Timers ("10 minute ka timer lagao", "5 मिनट का टाइमर"), alarms ("wake me up at 6 pm"), calls, opening ten common apps, web search, navigation, time, date and battery.
 - Spoken maths ("18% of 2,450", "25 into 4", "2 to the power of 10"). It uses a recursive-descent parser, **not `eval`**, because voice text is untrusted input.
 - Anything it doesn't recognise falls through to the cloud. A false negative costs one cloud call; a false positive would run the wrong action, so the rules are deliberately strict.
 
-Rules beat a small on-device model here. They are deterministic, ~1 ms on any phone, testable (25 tests), and easy for a reviewer to audit. A learned classifier becomes worth it once real traffic shows which phrasings the rules miss. The route tag on every answer is the telemetry hook for that.
+Rules beat a small on-device model here. They are deterministic, ~1 ms on any phone, testable (42 tests), and easy for a reviewer to audit. A learned classifier becomes worth it once real traffic shows which phrasings the rules miss. The route tag on every answer is the telemetry hook for that.
 
 **Phone cache** (`app/src/answerCache.ts`). An LRU of 300 answers in AsyncStorage (~60 KB). It stores an answer only when the server returned `cacheTtlSec > 0`, so time-sensitive answers and follow-ups never land on the phone. A repeated question costs no network, no quota and no server request, and works offline.
+
+**Alarms and timers in three languages.** The router finds the time anywhere in the sentence, because Hindi puts it before the verb ("kal subah 10 baje ka alarm lagao"). It understands:
+- Hindi and Hinglish number words (barah or bara, das, बारह…)
+- the fractions English lacks: saade 7 = 7:30, sava 8 = 8:15, paune 7 = 6:45, dedh = 1.5, dhai = 2.5
+- times of day: subah, dopahar, shaam, raat, bhor and their Devanagari forms
+- relative alarms ("alarm in 10 minutes", "20 minute baad")
+- ambiguous hours ("alarm for 7"), resolved to the *next* 7 o'clock, as Google's assistant does
+
+The router fails safe:
+- "cancel the 10 o'clock alarm" never *sets* one; it opens the alarms screen.
+- "set 2 alarms" is a count, not a time.
+- An impossible time is never guessed.
+- "set an alarm" with no time opens the clock app rather than going to the cloud.
+
+**Honesty about actions.** In device testing, a command the router missed went to the LLM, and `gpt-oss-20b` replied "Sure, setting an alarm for 10:00 AM" when nothing had been set. A system-prompt rule did not stop it. Two guards in code now do:
+1. A phone command that reaches the server ("…alarm lagao", "message bhejo", "remind me…") gets a fixed, honest reply in the user's language, with no LLM call and no cache entry.
+2. Any model answer that claims an action ("setting an alarm", "लगा दिया") is replaced by that reply and not cached.
 
 ## 5. The cloud path
 
@@ -119,7 +138,7 @@ An L2 hit is promoted into L1 for 5 minutes, so a hot key costs at most one KV r
 - Hot keys are served from the PoP's local cache.
 
 Alternatives considered:
-- The Cache API (`caches.default`) is a no-op on `*.workers.dev`. It becomes a useful per-PoP tier once the API is on a custom domain (§11).
+- The Cache API (`caches.default`) is a no-op on `*.workers.dev`. It becomes a useful per-PoP tier once the API is on a custom domain (§14).
 - Upstash's free tier (500k commands/month) is smaller than KV's (3M reads/month).
 - D1 and Durable Objects are databases, not caches. They add a hop to a single region.
 
@@ -206,7 +225,8 @@ The on-device tier already covers what a cheap, fast cloud model would have adde
 Each provider has a circuit breaker:
 - **429:** bench the provider for its `Retry-After` window (default 30 s), then try the next one immediately. On free tiers a 429 is normal traffic, not an incident.
 - **401 / 403 / 404:** bench for 5 minutes. A bad key or model ID won't fix itself.
-- **5xx, timeout (8 s) or network error:** bench for 15 s after 3 consecutive failures.
+- **Time limits:** each attempt is capped at 6 s, and the whole chain at 10 s. The server always answers, even if only "busy", before the app's 15 s timeout, so a slow provider never looks like "no internet".
+- **5xx, timeout or network error:** bench for 15 s after 3 consecutive failures.
 - **Every provider down:** return 503 with a `Retry-After` header. The app speaks "The assistant is busy, try again in N seconds", and device commands keep working.
 
 ## 8. Capacity model for 10 lakh concurrent users
@@ -277,6 +297,10 @@ What the table shows:
 | No network on the phone | Device commands and phone-cached answers still work. Other questions get a spoken "I can't reach the server; timers, alarms, maths and app commands still work offline". |
 | Groq rate-limited | Fails over to Groq 120b, then OpenRouter, within the same request |
 | Every LLM provider down | 503 + `Retry-After`, spoken to the user. Cached answers keep being served. |
+| A provider hangs | 6 s per attempt, 10 s for the whole chain, then "busy, try again". The app waits 15 s, so it always gets the server's answer. |
+| The model claims it set an alarm or sent a message | The reply is replaced with an honest "I couldn't do that…" and not cached (§4) |
+| A question looks like a command ("how do I get a passport", "open source kya hai") | Questions are never turned into actions. An audit table of these is in the tests. |
+| An answer is cut off by the token limit | It is spoken but never cached, and leftover reasoning text is stripped |
 | KV down or over quota | Reads fall back to L1 or a miss. Writes pause for 10 minutes. Requests never fail because of the cache. |
 | Thundering herd on a new popular question | Single-flight: one LLM call per isolate per key |
 | One device spamming | Per-device token bucket (20/min) and per-IP (120/min) → 429 + `Retry-After` |
@@ -286,12 +310,58 @@ What the table shows:
 
 ## 12. Security and privacy
 
-- **No audio leaves the phone.** The server receives only the transcribed text of open questions.
+- **Audio never reaches our servers.** With the offline language pack installed it never leaves the phone. Without it, Android's recognition service (Google) transcribes it online. Our server receives only the transcribed text of open questions.
 - **No accounts and no PII.** The device ID is a random UUID per install, used only for rate limiting. Logs never contain question text, only provider error codes.
 - **Provider keys exist only as Worker secrets.** The APK contains no secret, and an optional `APP_TOKEN` header adds a shared-secret gate.
 - **The cache stores answers only, keyed by a hash of the normalised question.** No device ID or history ever enters a cache entry.
 
-## 13. What I would do next, in priority order
+## 13. Known limitations
+
+These are deliberate scope limits or platform constraints, not bugs. Each one notes what lifting it would take.
+
+**Device actions**
+| Limitation | Why | To lift it |
+|---|---|---|
+| Alarms have no date: "kal 10 baje" at 9 am rings today at 10. Vaani says so out loud. | Android's `SET_ALARM` intent has no date field | Schedule our own alarm with `AlarmManager` (needs a native module) |
+| Can't delete or edit alarms and timers; "cancel" opens the alarms screen | No reliable cross-OEM intent for it | OEM-specific handling |
+| "30 minutes before 10" isn't understood | Rare phrasing, kept out to keep the parser simple | One more rule |
+| Calls only take spoken digits ("call 98765 43210"), not contact names, and open the dialer instead of calling | Avoids the contacts and `CALL_PHONE` permissions | Contacts permission + fuzzy name match |
+| No reminders, messages, WhatsApp sending, calendar events, music control, or Wi-Fi/Bluetooth/torch toggles | Each needs its own permission and intent; out of scope | Per-feature intents and permissions |
+| Can't install apps; offers the Play Store page instead | Play policy: only stores install apps, and the user must tap Install | Not possible for a normal app |
+| Opening apps: ~50 popular apps by name. Others need the build with the launcher-visibility manifest entry, and unknown names become a Play Store search. | Since Android 11, an app can't see other packages without declaring it | Rebuild (already configured) |
+| `SKIP_UI` for alarms and timers is a hint; some OEM clock apps still show their UI | OEM behaviour | None |
+
+**Voice and language**
+| Limitation | Why |
+|---|---|
+| Tap to talk only: no "Hey Vaani" wake word, no background or lock-screen listening | Always-on listening needs a foreground service, battery budget and a hotword model |
+| English (India) and Hindi only; Hinglish works through the en-IN recogniser | The router rules and prompts are written for these; other Indian languages need their own rules |
+| Recognition quality and offline support depend on the phone's recogniser and installed packs | System engine (decision D1) |
+| Hindi voice output needs the phone's Hindi TTS voice data | System TTS |
+
+**Answers (cloud)**
+| Limitation | Why |
+|---|---|
+| No live data (weather, news, prices, scores); the model says so and suggests "search for…" | No tools or retrieval, by design, to keep latency and cost low |
+| Answers are capped at 2 short sentences, with no sources, and can still be wrong | Voice UX and a small model. The prompt forbids invented facts; nothing enforces it. |
+| Follow-up memory covers only the last 2 cloud turns within 2 minutes, and follow-up detection is heuristic | Keeps answers cacheable (§6.3) |
+| The cache is exact-match after normalisation, so paraphrases miss. Entries live 7 days, and a new entry takes up to 60 s to reach other edge locations. | Correctness over hit rate (§6.6) |
+
+**Scale and operations**
+| Limitation | Why |
+|---|---|
+| The free tier allows ~2,000 new LLM answers/day (Groq) + 50 (OpenRouter), and 100k requests/day on Workers. Beyond that users hear "busy, try again". | Free tiers. Lifting it needs paid capacity, not code (§8). |
+| Rate limits are per isolate and the device ID is self-reported, so abuse protection is coarse | Next step: WAF / Rate Limiting binding (§11) |
+| No accounts, so history and the answer cache are per phone (40 turns, 300 answers) | Privacy and simplicity |
+| Metrics are per isolate; no dashboards or alerts | Next step: Workers Analytics Engine (§14) |
+
+**Testing**
+| Limitation | Why |
+|---|---|
+| 70 automated tests: unit and API tests, including Hindi and Hinglish routing, a regression table from a pre-submission edge-case audit, and two simulated Worker isolates sharing KV | |
+| No automated UI or end-to-end tests. Manual testing was on one device (Realme RMX3360, Android 13, ColorOS). | Samsung and Xiaomi clock and recogniser behaviour is unverified |
+
+## 14. What I would do next, in priority order
 
 1. **Custom domain → add the Cache API as a per-PoP tier** between L1 and KV. It is free and unmetered, and it takes most KV reads off the bill.
 2. **Global rate limiting** with the Workers Rate Limiting binding or WAF rules (§11).
@@ -300,14 +370,15 @@ What the table shows:
 5. **Stream the LLM answer and start TTS on the first sentence.** It matters less here because answers are capped at 2 sentences and Groq produces them in ~200 ms, but it would hide tail latency.
 6. **A pre-warmed answer pack:** ship the top ~1,000 evergreen Q&As inside the APK, so a new install has cache hits on day one.
 
-## 14. How to verify
+## 15. How to verify
 
 ```bash
-cd backend && npm test   # 22 tests: normaliser, follow-up rules, LRU, KV tier shared across two
+cd backend && npm test   # 28 tests: normaliser, follow-up rules, LRU, KV tier shared across two
                          # isolates, write-pause, coalescing (1 LLM call + 1 KV write for 20 requests),
-                         # failover, rate limits, validation
+                         # failover, deadline budget, action guards, rate limits, validation
 npm run bench            # the table in §8
-cd ../app && npm test    # 25 tests: intent router in 3 languages, maths parser, phone cache keys
+cd ../app && npm test    # 42 tests: intent router in 3 languages (alarms, timers, apps, maths),
+                         # "questions never become actions" table, phone cache keys
 ```
 
 The same question asked from two places shows the tiers directly: `CLOUD · groq` → `CACHE · EDGE` → `CACHE · PHONE`.

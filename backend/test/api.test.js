@@ -4,8 +4,8 @@ import { createApp } from '../src/app.js';
 import { LRU, TieredCache } from '../src/cache.js';
 import { loadConfig } from '../src/config.js';
 import { SingleFlight, TokenBucket } from '../src/guards.js';
-import { ProviderChain, cleanForSpeech } from '../src/llm.js';
-import { isFollowUp, isTimeSensitive, normalize } from '../src/normalize.js';
+import { ProviderChain, claimsAction, cleanForSpeech } from '../src/llm.js';
+import { isDeviceCommand, isFollowUp, isTimeSensitive, normalize } from '../src/normalize.js';
 
 const DEVICE = 'test-device-0001';
 
@@ -29,8 +29,15 @@ function fakeKv({ failPuts = false } = {}) {
   };
 }
 
-function makeApp(env = {}, fetchImpl) {
-  const cfg = loadConfig({ MOCK_LLM: '1', MOCK_LATENCY_MS: '20', ...env });
+// A stand-in LLM provider: answers "Answer to <question>" after 20 ms.
+const fakeLLM = async (url, init) => {
+  await new Promise((r) => setTimeout(r, 20));
+  const q = JSON.parse(init.body).messages.at(-1).content;
+  return new Response(JSON.stringify({ choices: [{ message: { content: `Answer to ${q}` }, finish_reason: 'stop' }] }), { status: 200 });
+};
+
+function makeApp(env = {}, fetchImpl = fakeLLM) {
+  const cfg = loadConfig({ GROQ_API_KEY: 'k', ...env });
   return createApp(() => cfg, { fetchImpl });
 }
 
@@ -278,4 +285,97 @@ describe('POST /v1/ask', () => {
     assert.equal(res.status, 503);
     assert.equal(res.headers.get('retry-after'), '9');
   });
+
+  it('never lets the LLM pretend to act on the phone', async () => {
+    let llmCalls = 0;
+    const fetchImpl = async () => {
+      llmCalls++;
+      return new Response(JSON.stringify({ choices: [{ message: { content: 'Sure, setting an alarm for 10:00 AM.' } }] }), { status: 200 });
+    };
+    const app = createApp(() => loadConfig({ GROQ_API_KEY: 'k' }), { fetchImpl });
+    const cmd = await (await ask(app, { query: 'cal Subah 10:00 baje ka alarm lagao' })).json();
+    assert.equal(cmd.provider, 'guard');
+    assert.equal(llmCalls, 0, 'commands never reach the LLM');
+    const sneaky = await (await ask(app, { query: 'what time should I wake up for a 6 am flight' })).json();
+    assert.equal(llmCalls, 1);
+    assert.match(sneaky.answer, /couldn't do that/);
+    assert.equal(sneaky.cacheTtlSec, 0, 'the replaced answer is not cached');
+  });
 });
+
+describe('action guards', () => {
+  it('spots phone commands that reached the cloud', () => {
+    for (const q of ['cal Subah 10:00 baje ka alarm lagao', 'mummy ko message bhejo', 'remind me to call mom at 5', 'मम्मी को मैसेज भेजो', 'set a reminder for tomorrow']) {
+      assert.ok(isDeviceCommand(normalize(q)), q);
+    }
+    for (const q of ['how does an alarm clock work', 'what is a timer in electronics', 'who invented the telephone call', 'what is UPI']) {
+      assert.ok(!isDeviceCommand(normalize(q)), q);
+    }
+  });
+  it('spots a model claiming it acted', () => {
+    for (const t of ['Sure, setting an alarm for 10:00 AM.', "I've set a timer for 5 minutes.", 'आपका अलार्म लगा दिया है।', 'Alarm set for 7 am.']) assert.ok(claimsAction(t), t);
+    for (const t of ['UPI is a payment system.', 'An alarm clock uses a timer circuit to ring at a set time.']) assert.ok(!claimsAction(t), t);
+  });
+
+  it('passes the audit edge cases', () => {
+    // symbols that change meaning keep distinct cache keys
+    assert.notEqual(normalize('what is c++'), normalize('what is c'));
+    assert.notEqual(normalize('what is c#'), normalize('what is c'));
+    assert.notEqual(normalize('is o+ blood universal donor'), normalize('is o- blood universal donor'));
+    assert.notEqual(normalize('-40 in fahrenheit'), normalize('40 in fahrenheit'));
+    // "now" questions never enter the cache; Devanagari words are whole words
+    for (const q of ['tell me the time', 'time batao', 'क्या टाइम हुआ है', 'delhi ka mausam kaisa hai', 'मौसम कैसा है', 'who won the match', '1 dollar in rupees', 'gold ka bhav', 'sensex']) {
+      assert.ok(isTimeSensitive(normalize(q)), q);
+    }
+    for (const q of ['कला क्या है', 'भारत को आज़ादी किसने दिलाई']) assert.ok(!isTimeSensitive(normalize(q)), q);
+    // follow-ups
+    for (const q of ['hindi mein batao', 'हिंदी में बताओ', 'क्यों', 'why so', 'in simple words']) assert.ok(isFollowUp(normalize(q)), q);
+    assert.ok(isFollowUp(normalize('population kitni hai'), true), 'short question mid-conversation');
+    assert.ok(!isFollowUp(normalize('population kitni hai'), false));
+    assert.ok(!isFollowUp(normalize('capital of france'), true));
+    assert.ok(!isFollowUp(normalize('what is upi'), true));
+    // cut-off reasoning is never spoken
+    assert.equal(cleanForSpeech('<think>long reasoning that never closed'), '');
+  });
+
+  it('never caches demo answers or truncated ones, and reports remaining TTL', async () => {
+    const demo = createApp(() => loadConfig({ MOCK_LLM: '1', MOCK_LATENCY_MS: '1' }));
+    await ask(demo, { query: 'what is upi' });
+    const again = await (await ask(demo, { query: 'what is upi' })).json();
+    assert.equal(again.source, 'llm');
+    assert.equal(again.cacheTtlSec, 0);
+
+    const cut = async () => new Response(JSON.stringify({ choices: [{ message: { content: 'UPI is a' }, finish_reason: 'length' }] }), { status: 200 });
+    const app = makeApp({}, cut);
+    await ask(app, { query: 'what is gst' });
+    assert.equal((await (await ask(app, { query: 'what is gst' })).json()).source, 'llm');
+
+    const ok = makeApp();
+    const first = await (await ask(ok, { query: 'who wrote the gita' })).json();
+    assert.equal(first.cacheVersion, 'a3');
+    const hit = await (await ask(ok, { query: 'who wrote the gita' })).json();
+    assert.ok(hit.cacheTtlSec > 0 && hit.cacheTtlSec <= first.cacheTtlSec);
+  });
+
+  it('stops trying providers when the overall budget is spent', async () => {
+    let calls = 0;
+    // Hangs until aborted. The ref'd timer stands in for the open socket a real fetch holds.
+    const slow = (url, init) => {
+      calls++;
+      return new Promise((r, j) => {
+        const socket = setTimeout(() => {}, 5000);
+        init.signal.addEventListener('abort', () => {
+          clearTimeout(socket);
+          j(new Error('timeout'));
+        });
+      });
+    };
+    const app = createApp(() => loadConfig({ GROQ_API_KEY: 'k', OPENROUTER_API_KEY: 'o', LLM_TIMEOUT_MS: '200', LLM_BUDGET_MS: '800' }), { fetchImpl: slow });
+    const t0 = Date.now();
+    const res = await ask(app, { query: 'explain quantum computing' });
+    assert.equal(res.status, 503);
+    assert.ok(Date.now() - t0 < 1200, 'answers within the budget');
+    assert.equal(calls, 2, 'third provider skipped: not enough time left');
+  });
+});
+

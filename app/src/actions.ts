@@ -34,18 +34,112 @@ function spokenDuration(seconds: number, locale: Locale) {
   return parts.join(' ');
 }
 
-const APP_TARGETS: Record<AppKey, () => Promise<void>> = {
-  youtube: () => openUrl('vnd.youtube://', 'https://www.youtube.com'),
-  maps: () => openUrl('geo:0,0', 'https://maps.google.com'),
-  camera: () => launch('android.media.action.STILL_IMAGE_CAMERA'),
-  settings: () => launch(IntentLauncher.ActivityAction.SETTINGS),
-  whatsapp: () => openUrl('whatsapp://send', 'https://wa.me'),
-  gmail: () => openUrl('googlegmail://', 'mailto:'),
-  browser: () => openUrl('https://www.google.com'),
-  playstore: () => openUrl('market://search?q=', 'https://play.google.com/store'),
-  calendar: () => launch('android.intent.action.VIEW', { data: 'content://com.android.calendar/time/' }),
-  clock: () => launch('android.intent.action.SHOW_ALARMS'),
+// How each app is opened, tried in this order:
+//   1. a system intent (camera, settings, alarms…)
+//   2. the package's launcher activity: works for every installed app once the
+//      manifest declares launcher visibility (plugins/withLauncherQueries.js)
+//   3. a deep link, each one verified to resolve to the app on a real phone, so it
+//      works even on builds without (2)
+//   4. the website, for apps that have a useful one
+//   5. the app's Play Store page: it is not installed (or could not be seen)
+type Target = { pkg?: string; url?: string; web?: string; intent?: [action: string, data?: string] };
+
+const APP_TARGETS: Record<AppKey, Target> = {
+  youtube: { pkg: 'com.google.android.youtube', url: 'vnd.youtube://', web: 'https://www.youtube.com' },
+  maps: { pkg: 'com.google.android.apps.maps', url: 'geo:0,0', web: 'https://maps.google.com' },
+  camera: { intent: ['android.media.action.STILL_IMAGE_CAMERA'] },
+  settings: { intent: [IntentLauncher.ActivityAction.SETTINGS] },
+  whatsapp: { pkg: 'com.whatsapp', url: 'whatsapp://send', web: 'https://wa.me' },
+  gmail: { pkg: 'com.google.android.gm', url: 'googlegmail://', web: 'mailto:' },
+  browser: { web: 'https://www.google.com' },
+  chrome: { pkg: 'com.android.chrome', web: 'https://www.google.com' },
+  playstore: { pkg: 'com.android.vending', url: 'market://search?q=' },
+  calendar: { pkg: 'com.google.android.calendar', intent: ['android.intent.action.VIEW', 'content://com.android.calendar/time/'] },
+  clock: { intent: ['android.intent.action.SHOW_ALARMS'] },
+  telegram: { pkg: 'org.telegram.messenger', url: 'tg://resolve', web: 'https://web.telegram.org' },
+  instagram: { pkg: 'com.instagram.android' },
+  facebook: { pkg: 'com.facebook.katana', url: 'fb://feed' },
+  twitter: { pkg: 'com.twitter.android', url: 'twitter://timeline' },
+  linkedin: { pkg: 'com.linkedin.android', url: 'linkedin://' },
+  snapchat: { pkg: 'com.snapchat.android', url: 'snapchat://' },
+  spotify: { pkg: 'com.spotify.music', url: 'spotify:home' },
+  jiosaavn: { pkg: 'com.jio.media.jiobeats' },
+  netflix: { pkg: 'com.netflix.mediaclient', url: 'nflx://www.netflix.com/browse' },
+  hotstar: { pkg: 'in.startv.hotstar', url: 'hotstar://' },
+  primevideo: { pkg: 'com.amazon.avod.thirdpartyclient' },
+  amazon: { pkg: 'in.amazon.mShop.android.shopping', url: 'com.amazon.mobile.shopping://www.amazon.in/' },
+  flipkart: { pkg: 'com.flipkart.android', url: 'flipkart://' },
+  myntra: { pkg: 'com.myntra.android' },
+  meesho: { pkg: 'com.meesho.supply' },
+  ajio: { pkg: 'com.ril.ajio' },
+  zomato: { pkg: 'com.application.zomato', url: 'zomato://' },
+  swiggy: { pkg: 'in.swiggy.android', url: 'swiggy://' },
+  zepto: { pkg: 'com.zeptoconsumerapp' },
+  blinkit: { pkg: 'com.grofers.customerapp' },
+  bigbasket: { pkg: 'com.bigbasket.mobileapp' },
+  jiomart: { pkg: 'com.jpl.jiomart' },
+  gpay: { pkg: 'com.google.android.apps.nbu.paisa.user' },
+  phonepe: { pkg: 'com.phonepe.app' },
+  paytm: { pkg: 'net.one97.paytm' },
+  cred: { pkg: 'com.dreamplug.androidapp' },
+  uber: { pkg: 'com.ubercab', url: 'uber://' },
+  ola: { pkg: 'com.olacabs.customer' },
+  irctc: { pkg: 'cris.org.in.prs.ima' },
+  truecaller: { pkg: 'com.truecaller' },
+  discord: { pkg: 'com.discord' },
+  myjio: { pkg: 'com.jio.myjio' },
+  photos: { pkg: 'com.google.android.apps.photos' },
+  messages: { pkg: 'com.google.android.apps.messaging', url: 'sms:' },
+  contacts: { pkg: 'com.google.android.contacts', intent: ['android.intent.action.VIEW', 'content://contacts/people/'] },
+  files: { pkg: 'com.google.android.apps.nbu.files' },
 };
+
+/** Returns 'opened', or 'store' when we fell back to the Play Store page. */
+async function openApp(t: Target): Promise<'opened' | 'store'> {
+  if (t.intent) {
+    try {
+      await launch(t.intent[0], t.intent[1] ? { data: t.intent[1] } : {});
+      return 'opened';
+    } catch {
+      /* fall through */
+    }
+  }
+  if (t.pkg) {
+    try {
+      IntentLauncher.openApplication(t.pkg); // throws if not installed or not visible
+      return 'opened';
+    } catch {
+      /* fall through */
+    }
+  }
+  for (const u of [t.url, t.web]) {
+    if (!u) continue;
+    try {
+      await Linking.openURL(u);
+      return 'opened';
+    } catch {
+      /* fall through */
+    }
+  }
+  if (!t.pkg) throw new Error('no way to open this app');
+  await openUrl(`market://details?id=${t.pkg}`, `https://play.google.com/store/apps/details?id=${t.pkg}`);
+  return 'store';
+}
+
+const title = (s: string) => s.replace(/\b\p{L}/gu, (c) => c.toUpperCase());
+
+// Readable aloud: no "-0", no 100-group digit strings, no "Infinity".
+export function spokenNumber(value: number): string {
+  if (!Number.isFinite(value)) return 'too large to say';
+  const v = Object.is(value, -0) ? 0 : value;
+  const abs = Math.abs(v);
+  if (abs !== 0 && (abs >= 1e15 || abs < 1e-6)) {
+    const [mantissa, exp] = v.toExponential(3).split('e');
+    return `${Number(mantissa)} times 10 to the power ${Number(exp)}`;
+  }
+  const rounded = Math.round(v * 1e6) / 1e6;
+  return (Object.is(rounded, -0) ? 0 : rounded).toLocaleString('en-IN', { maximumFractionDigits: 6 });
+}
 
 export type LocalResult = { reply: string; tag: string };
 
@@ -72,17 +166,38 @@ export async function runLocal(intent: Exclude<Intent, { kind: 'cloud' | 'stop' 
         },
       });
       const when = new Date(2000, 0, 1, intent.hour, intent.minute).toLocaleTimeString('en-IN', { hour: 'numeric', minute: '2-digit' });
+      // Android alarms have no date: they ring at the next occurrence of the time.
+      const now = new Date();
+      const ringsToday = intent.hour * 60 + intent.minute > now.getHours() * 60 + now.getMinutes();
+      if (!ringsToday) {
+        return { reply: hi(locale, `Alarm set for ${when} tomorrow.`, `कल ${when} का अलार्म लगा दिया है।`), tag: 'alarm' };
+      }
+      if (intent.tomorrow) {
+        return {
+          reply: hi(
+            locale,
+            `Alarm set for ${when}. Android rings it at the next ${when}, which is today, so turn it off after it rings if you meant tomorrow.`,
+            `${when} का अलार्म लगा दिया है। ध्यान दें, यह आज ${when} बजे बजेगा, क्योंकि Android अलार्म में तारीख नहीं होती।`,
+          ),
+          tag: 'alarm',
+        };
+      }
       return { reply: hi(locale, `Alarm set for ${when}.`, `${when} का अलार्म लगा दिया है।`), tag: 'alarm' };
     }
     case 'call':
       await Linking.openURL(`tel:${intent.number}`);
       return { reply: hi(locale, `Opening the dialer for ${intent.number.split('').join(' ')}.`, `${intent.number} डायल कर रही हूँ।`), tag: 'call' };
     case 'open': {
+      const name = title(intent.name);
       if (!intent.app) {
-        return { reply: hi(locale, `I can't open ${intent.name} yet.`, `${intent.name} अभी नहीं खोल सकती।`), tag: 'open' };
+        await openUrl(`market://search?q=${encodeURIComponent(intent.name)}&c=apps`, `https://play.google.com/store/search?q=${encodeURIComponent(intent.name)}&c=apps`);
+        return { reply: hi(locale, `I don't know ${name} yet. Here it is on the Play Store.`, `${name} अभी नहीं पहचानती, Play Store पर खोल रही हूँ।`), tag: 'open' };
       }
-      await APP_TARGETS[intent.app]();
-      return { reply: hi(locale, `Opening ${intent.name}.`, `${intent.name} खोल रही हूँ।`), tag: 'open' };
+      const how = await openApp(APP_TARGETS[intent.app]);
+      if (how === 'store') {
+        return { reply: hi(locale, `${name} isn't installed. Opening it on the Play Store.`, `${name} इंस्टॉल नहीं है, Play Store पर खोल रही हूँ।`), tag: 'open' };
+      }
+      return { reply: hi(locale, `Opening ${name}.`, `${name} खोल रही हूँ।`), tag: 'open' };
     }
     case 'search':
       await Linking.openURL(`https://www.google.com/search?q=${encodeURIComponent(intent.q)}`);
@@ -111,8 +226,8 @@ export async function runLocal(intent: Exclude<Intent, { kind: 'cloud' | 'stop' 
       };
     }
     case 'math': {
-      const v = Math.round(intent.value * 1e6) / 1e6;
-      return { reply: hi(locale, `That's ${v.toLocaleString('en-IN')}.`, `जवाब है ${v.toLocaleString('en-IN')}।`), tag: 'math' };
+      const said = spokenNumber(intent.value);
+      return { reply: hi(locale, `That's ${said}.`, `जवाब है ${said}।`), tag: 'math' };
     }
   }
 }

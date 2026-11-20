@@ -59,7 +59,9 @@ function Screen() {
   const [turns, setTurns] = useState<Turn[]>([]);
   const [typing, setTyping] = useState(false);
   const [draft, setDraft] = useState('');
-  const deviceId = useRef<string>('');
+  // Resolved once; awaited by cloud calls so an early question never goes out without it.
+  const [deviceId] = useState(() => getDeviceId());
+  const historyLoaded = useRef(false);
   const scroll = useRef<ScrollViewInstance>(null);
   const turnsRef = useRef<Turn[]>([]);
   useEffect(() => {
@@ -67,14 +69,30 @@ function Screen() {
   }, [turns]);
 
   useEffect(() => {
-    getDeviceId().then((id) => (deviceId.current = id));
-    loadTurns().then(setTurns);
+    // Merge rather than replace: a command run before storage answers must not be lost,
+    // and must not overwrite the stored history either (push skips saving until now).
+    // Idempotent: dev builds run mount effects twice, so merge once and de-duplicate by id
+    // (which also repairs any duplicates already saved).
+    let cancelled = false;
+    loadTurns().then((stored) => {
+      if (cancelled || historyLoaded.current) return;
+      historyLoaded.current = true;
+      setTurns((prev) => {
+        const seen = new Set<string>();
+        const merged = [...stored, ...prev].filter((t) => !seen.has(t.id) && (seen.add(t.id), true)).slice(-40);
+        if (merged.length !== stored.length || prev.length) saveTurns(merged);
+        return merged;
+      });
+    });
+    return () => {
+      cancelled = true;
+    };
   }, []);
 
   const push = useCallback((t: Turn) => {
     setTurns((prev) => {
       const next = [...prev, t];
-      saveTurns(next);
+      if (historyLoaded.current) saveTurns(next);
       return next;
     });
   }, []);
@@ -87,6 +105,7 @@ function Screen() {
     async (said: string) => {
       const intent = route(said);
       voice.setInterim('');
+      voice.silence(); // a new command interrupts whatever is still being spoken
 
       if (intent.kind === 'stop') return voice.hush();
       if (intent.kind === 'clear') {
@@ -95,7 +114,7 @@ function Screen() {
         return voice.speak(locale === 'hi-IN' ? 'साफ़ कर दिया।' : 'Cleared.', locale);
       }
 
-      const base = { id: `${Date.now()}`, at: Date.now(), said };
+      const base = { id: `${Date.now()}-${Math.random().toString(36).slice(2, 6)}`, at: Date.now(), said };
       voice.setPhase('thinking');
 
       if (intent.kind === 'cloud') {
@@ -115,8 +134,8 @@ function Screen() {
           { role: 'assistant' as const, content: t.reply },
         ]);
         try {
-          const r = await askCloud({ query: said, locale, deviceId: deviceId.current, history });
-          putCached(said, locale, r.answer, r.cacheTtlSec, r.provider);
+          const r = await askCloud({ query: said, locale, deviceId: await deviceId, history });
+          putCached(said, locale, r.answer, r.cacheTtlSec, r.provider, r.cacheVersion);
           const fromCache = r.source === 'cache';
           push({ ...base, reply: r.answer, route: fromCache ? 'cache' : 'cloud', detail: fromCache ? 'edge' : (r.provider ?? 'llm'), ms: r.roundTripMs });
           voice.speak(r.answer, locale);
@@ -154,7 +173,7 @@ function Screen() {
 
   const submitDraft = () => {
     const text = draft.trim();
-    if (!text || voice.phase === 'thinking') return;
+    if (!text || voice.phase === 'thinking' || voice.phase === 'listening') return;
     setDraft('');
     handle(text);
   };
@@ -193,6 +212,7 @@ function Screen() {
                 placeholderTextColor={c.faint}
                 style={s.input}
                 autoFocus
+                maxLength={500}
                 returnKeyType="send"
               />
               <Pressable onPress={submitDraft} hitSlop={8} accessibilityLabel="Send" style={s.send}>

@@ -4,11 +4,13 @@
 
 import { Hono } from 'hono';
 import { bodyLimit } from 'hono/body-limit';
+import { cors } from 'hono/cors';
 import { KvStore, TieredCache, UpstashStore } from './cache.js';
 import { CACHE_VERSION } from './config.js';
 import { SingleFlight, TokenBucket } from './guards.js';
 import { AllProvidersFailed, CANT_ACT, ProviderChain, buildMessages, claimsAction } from './llm.js';
 import { hashKey, isDeviceCommand, isFollowUp, isTimeSensitive, normalize } from './normalize.js';
+import { SAFE_REPLY, checkOutput, classify, redactPII, sanitize } from './safety.js';
 
 const LOCALES = new Set(['en-IN', 'hi-IN']);
 const DEVICE_ID = /^[A-Za-z0-9-]{8,64}$/;
@@ -61,12 +63,17 @@ export function createApp(resolveConfig, { fetchImpl } = {}) {
       perDevice: new TokenBucket({ perMinute: cfg.rate.perDevicePerMin }),
       perIp: new TokenBucket({ perMinute: cfg.rate.perIpPerMin }),
       flights: new SingleFlight(),
-      m: { requests: 0, followUps: 0, deviceCommands: 0, claimedActions: 0, llmCalls: 0, coalesced: 0, rateLimited: 0, upstreamFailures: 0, startedAt: Date.now() },
+      m: { requests: 0, followUps: 0, deviceCommands: 0, claimedActions: 0, guarded: { self_harm: 0, dangerous: 0, sexual_minors: 0, injection: 0, pii: 0, output: 0 }, llmCalls: 0, coalesced: 0, rateLimited: 0, upstreamFailures: 0, startedAt: Date.now() },
     };
     return state;
   };
 
   const app = new Hono();
+
+  // The web build of the app (react-native-web, e.g. for demos) calls the API from
+  // another origin. The API is public and cookie-free, so any origin may call it;
+  // abuse control stays with the rate limits, not the browser.
+  app.use('*', cors({ origin: '*', allowMethods: ['GET', 'POST', 'OPTIONS'], allowHeaders: ['content-type', 'x-device-id', 'x-app-token'], maxAge: 86400 }));
 
   app.get('/healthz', (c) => {
     const s = init(c);
@@ -122,8 +129,22 @@ export function createApp(resolveConfig, { fetchImpl } = {}) {
       const problem = validate(body);
       if (problem) return c.json({ error: problem }, 400);
 
-      const query = body.query.trim();
       const locale = body.locale || 'en-IN';
+
+      // ---- input guardrails (safety.js) ----
+      // 1. Strip invisible and control characters used to smuggle instructions.
+      const raw = sanitize(body.query);
+      if (!/[\p{L}\p{N}]/u.test(raw)) return c.json({ error: 'query must contain words' }, 400);
+      // 2. Self-harm, dangerous requests and prompt injection never reach the LLM.
+      const harm = classify(raw);
+      if (harm) {
+        s.m.guarded[harm]++;
+        return c.json({ answer: SAFE_REPLY[harm][locale], source: 'llm', provider: 'guard', guard: harm, cacheTtlSec: 0, latencyMs: Date.now() - t0 });
+      }
+      // 3. Personal data is redacted before the LLM sees it, and such a question is never
+      //    cached: the cache is shared by every user.
+      const { text: query, kinds: pii } = redactPII(raw);
+      if (pii.length) s.m.guarded.pii++;
       const norm = normalize(query);
 
       // A phone command the device could not parse: answer honestly without an LLM call.
@@ -138,11 +159,15 @@ export function createApp(resolveConfig, { fetchImpl } = {}) {
       // phone, so the policy can change without shipping a new APK.
       // "I couldn't do that" replies are not conversation; don't let them make the next
       // question look like a follow-up.
-      const sent = (body.history || []).filter((h, i, all) => !(h.role === 'user' && Object.values(CANT_ACT).includes(all[i + 1]?.content)) && !Object.values(CANT_ACT).includes(h.content));
+      // History gets the same input guardrails: cleaned, redacted, flagged turns dropped.
+      const sent = (body.history || [])
+        .filter((h, i, all) => !(h.role === 'user' && Object.values(CANT_ACT).includes(all[i + 1]?.content)) && !Object.values(CANT_ACT).includes(h.content))
+        .map((h) => ({ role: h.role, content: redactPII(sanitize(h.content)).text }))
+        .filter((h) => h.content && !(h.role === 'user' && classify(h.content)));
       const followUp = isFollowUp(norm, sent.length > 0, query);
       if (followUp) s.m.followUps++;
       const history = followUp ? sent : [];
-      const cacheable = !followUp && norm.length > 0 && !isTimeSensitive(norm);
+      const cacheable = !followUp && norm.length > 0 && !isTimeSensitive(norm) && pii.length === 0;
       const ttl = s.cfg.cacheTtlSec;
       const key = cacheable ? `${CACHE_VERSION}:${await hashKey(`${locale}|${norm}`)}` : null;
 
@@ -173,6 +198,12 @@ export function createApp(resolveConfig, { fetchImpl } = {}) {
           if (claimsAction(out.text)) {
             s.m.claimedActions++;
             return { ...out, text: CANT_ACT[locale], uncacheable: true };
+          }
+          // ---- output guardrails: prompt leaks, harmful content, invented numbers ----
+          const checked = checkOutput(out.text, locale, query);
+          if (checked.replaced) {
+            s.m.guarded.output++;
+            return { ...out, text: checked.text, uncacheable: true };
           }
           // Demo answers and answers cut off by max_tokens are spoken but never shared.
           if (out.provider === 'mock' || out.truncated) return { ...out, uncacheable: true };

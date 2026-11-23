@@ -1,7 +1,7 @@
 // Executes on-device intents with Android system intents. No network, no backend.
 import * as Battery from 'expo-battery';
 import * as IntentLauncher from 'expo-intent-launcher';
-import { Linking } from 'react-native';
+import { Linking, Platform } from 'react-native';
 import type { AppKey, Intent } from './intents';
 
 export type Locale = 'en-IN' | 'hi-IN';
@@ -150,10 +150,21 @@ export function hindiClock(hour: number, minute: number): string {
 
 export type LocalResult = { reply: string; tag: string };
 
+// The same app also runs in a browser (react-native-web) for demos. A browser can't set an
+// alarm or place a call, so those are simulated and say so, instead of failing silently.
+const WEB = Platform.OS === 'web';
+const demo = (r: LocalResult, locale: Locale): LocalResult =>
+  WEB
+    ? {
+        reply: r.reply + hi(locale, ' (Browser demo: on a phone this goes to the Clock app.)', ' (ब्राउज़र डेमो: फ़ोन पर यह Clock ऐप में होता है।)'),
+        tag: `${r.tag} · web demo`,
+      }
+    : r;
+
 export async function runLocal(intent: Exclude<Intent, { kind: 'cloud' | 'stop' | 'clear' }>, locale: Locale): Promise<LocalResult> {
   switch (intent.kind) {
     case 'timer': {
-      await launch('android.intent.action.SET_TIMER', {
+      if (!WEB) await launch('android.intent.action.SET_TIMER', {
         extra: {
           'android.intent.extra.alarm.LENGTH': intent.seconds,
           'android.intent.extra.alarm.MESSAGE': 'Vaani',
@@ -161,10 +172,10 @@ export async function runLocal(intent: Exclude<Intent, { kind: 'cloud' | 'stop' 
         },
       });
       const d = spokenDuration(intent.seconds, locale);
-      return { reply: hi(locale, `Timer set for ${d}.`, `${d} का टाइमर लगा दिया है।`), tag: 'timer' };
+      return demo({ reply: hi(locale, `Timer set for ${d}.`, `${d} का टाइमर लगा दिया है।`), tag: 'timer' }, locale);
     }
     case 'alarm': {
-      await launch('android.intent.action.SET_ALARM', {
+      if (!WEB) await launch('android.intent.action.SET_ALARM', {
         extra: {
           'android.intent.extra.alarm.HOUR': intent.hour,
           'android.intent.extra.alarm.MINUTES': intent.minute,
@@ -178,25 +189,37 @@ export async function runLocal(intent: Exclude<Intent, { kind: 'cloud' | 'stop' 
       const now = new Date();
       const ringsToday = intent.hour * 60 + intent.minute > now.getHours() * 60 + now.getMinutes();
       if (!ringsToday) {
-        return { reply: hi(locale, `Alarm set for ${when} tomorrow.`, `कल ${kab} बजे का अलार्म लगा दिया है।`), tag: 'alarm' };
+        return demo({ reply: hi(locale, `Alarm set for ${when} tomorrow.`, `कल ${kab} बजे का अलार्म लगा दिया है।`), tag: 'alarm' }, locale);
       }
       if (intent.tomorrow) {
-        return {
+        return demo({
           reply: hi(
             locale,
             `Alarm set for ${when}. Android rings it at the next ${when}, which is today, so turn it off after it rings if you meant tomorrow.`,
             `${kab} बजे का अलार्म लगा दिया है। ध्यान दें, यह आज ${kab} बजे बजेगा, क्योंकि Android अलार्म में तारीख नहीं होती।`,
           ),
           tag: 'alarm',
-        };
+        }, locale);
       }
-      return { reply: hi(locale, `Alarm set for ${when}.`, `${kab} बजे का अलार्म लगा दिया है।`), tag: 'alarm' };
+      return demo({ reply: hi(locale, `Alarm set for ${when}.`, `${kab} बजे का अलार्म लगा दिया है।`), tag: 'alarm' }, locale);
     }
     case 'call':
+      if (WEB) {
+        return { reply: hi(locale, `On a phone this opens the dialer for ${intent.number.split('').join(' ')}. (Browser demo.)`, `फ़ोन पर यह ${intent.number} डायल करता है। (ब्राउज़र डेमो)`), tag: 'call · web demo' };
+      }
       await Linking.openURL(`tel:${intent.number}`);
       return { reply: hi(locale, `Opening the dialer for ${intent.number.split('').join(' ')}.`, `${intent.number} डायल कर रही हूँ।`), tag: 'call' };
     case 'open': {
       const name = title(intent.name);
+      if (WEB) {
+        // In a browser, "open YouTube" opens the website when there is one.
+        const site = intent.app ? APP_TARGETS[intent.app].web : undefined;
+        if (site && /^https?:/.test(site)) {
+          await Linking.openURL(site);
+          return { reply: hi(locale, `Opening ${name} in a new tab.`, `${name} नए टैब में खोल रही हूँ।`), tag: 'open · web demo' };
+        }
+        return { reply: hi(locale, `On a phone this opens the ${name} app. (Browser demo.)`, `फ़ोन पर यह ${name} ऐप खोलता है। (ब्राउज़र डेमो)`), tag: 'open · web demo' };
+      }
       if (!intent.app) {
         await openUrl(`market://search?q=${encodeURIComponent(intent.name)}&c=apps`, `https://play.google.com/store/search?q=${encodeURIComponent(intent.name)}&c=apps`);
         return { reply: hi(locale, `I don't know ${name} yet. Here it is on the Play Store.`, `${name} अभी नहीं पहचानती, Play Store पर खोल रही हूँ।`), tag: 'open' };
@@ -212,7 +235,8 @@ export async function runLocal(intent: Exclude<Intent, { kind: 'cloud' | 'stop' 
       return { reply: hi(locale, `Searching for ${intent.q}.`, `${intent.q} खोज रही हूँ।`), tag: 'search' };
     case 'navigate': {
       const q = encodeURIComponent(intent.place);
-      await openUrl(`google.navigation:q=${q}`, `https://www.google.com/maps/dir/?api=1&destination=${q}`);
+      if (WEB) await Linking.openURL(`https://www.google.com/maps/dir/?api=1&destination=${q}`);
+      else await openUrl(`google.navigation:q=${q}`, `https://www.google.com/maps/dir/?api=1&destination=${q}`);
       return { reply: hi(locale, `Starting directions to ${intent.place}.`, `${intent.place} का रास्ता खोल रही हूँ।`), tag: 'maps' };
     }
     case 'time': {

@@ -11,6 +11,7 @@ import {
   Easing,
   KeyboardAvoidingView,
   Modal,
+  Platform,
   Pressable,
   ScrollView,
   SectionList,
@@ -35,6 +36,10 @@ const SUGGESTIONS: { text: string; route: Route; note: string }[] = [
   { text: 'Explain UPI in one line', route: 'cloud', note: 'cloud' },
   { text: 'Open YouTube', route: 'device', note: 'on-device' },
 ];
+
+// eslint-disable-next-line no-control-regex
+const INVISIBLE = /[\u0000-\u0008\u000B\u000C\u000E-\u001F\u007F-\u009F\u200B\u200E\u200F\u202A-\u202E\u2060-\u2064\uFEFF]/g;
+const cleanInput = (t: string) => t.normalize('NFKC').replace(INVISIBLE, '').replace(/\s+/g, ' ').trim().slice(0, 500);
 
 const FOLLOW_UP_WINDOW_MS = 2 * 60_000;
 
@@ -113,18 +118,26 @@ function Screen() {
   }, []);
 
   const clearHistory = useCallback(() => {
+    const title = locale === 'hi-IN' ? 'इतिहास मिटाएँ?' : 'Clear history?';
+    const body = locale === 'hi-IN' ? 'इस फ़ोन से सारी पिछली बातचीत हट जाएगी।' : 'This removes every past conversation from this phone.';
+    const wipe = () => {
+      setHistory([]);
+      saveHistory([]);
+    };
+    // react-native-web's Alert is a no-op, so the browser build uses the browser's dialog.
+    if (Platform.OS === 'web') {
+      if (globalThis.confirm?.(`${title}\n\n${body}`)) wipe();
+      return;
+    }
     Alert.alert(
-      locale === 'hi-IN' ? 'इतिहास मिटाएँ?' : 'Clear history?',
-      locale === 'hi-IN' ? 'इस फ़ोन से सारी पिछली बातचीत हट जाएगी।' : 'This removes every past conversation from this phone.',
+      title,
+      body,
       [
         { text: locale === 'hi-IN' ? 'रद्द करें' : 'Cancel', style: 'cancel' },
         {
           text: locale === 'hi-IN' ? 'मिटाएँ' : 'Clear',
           style: 'destructive',
-          onPress: () => {
-            setHistory([]);
-            saveHistory([]);
-          },
+          onPress: wipe,
         },
       ],
     );
@@ -135,7 +148,12 @@ function Screen() {
   const voice = useVoice((text) => handleRef.current(text));
 
   const handle = useCallback(
-    async (said: string) => {
+    async (input: string) => {
+      // Input guardrail on the phone too: invisible/control characters stripped and length
+      // capped before anything is routed, so on-device commands get the same hygiene as the
+      // server (which repeats these checks; never trust the client).
+      const said = cleanInput(input);
+      if (!said) return;
       const intent = route(said);
       voice.setInterim('');
       voice.silence(); // a new command interrupts whatever is still being spoken
@@ -214,7 +232,7 @@ function Screen() {
   return (
     <View style={[s.root, { paddingTop: insets.top }]}>
       <StatusBar style={scheme === 'dark' ? 'light' : 'dark'} />
-      <KeyboardAvoidingView style={s.flex} behavior="padding">
+      <KeyboardAvoidingView style={s.column} behavior="padding">
         <View style={s.header}>
           <Text style={s.wordmark}>vaani</Text>
           <View style={s.headerRight}>
@@ -361,47 +379,49 @@ function HistoryPane({
 
   return (
     <Modal visible={visible} animationType="slide" onRequestClose={onClose} statusBarTranslucent>
-      <View style={[s.sheet, { paddingTop: insets.top }]}>
-        <View style={s.sheetHeader}>
-          <Text style={s.sheetTitle}>{locale === 'hi-IN' ? 'इतिहास' : 'History'}</Text>
-          <Pressable onPress={onClose} hitSlop={8} accessibilityRole="button" accessibilityLabel="Close history" style={s.headerBtn}>
-            <Feather name="x" size={16} color={c.ink} />
-          </Pressable>
-        </View>
-        <SectionList
-          sections={sections}
-          keyExtractor={(t) => t.id}
-          contentContainerStyle={s.sheetList}
-          stickySectionHeadersEnabled
-          renderSectionHeader={({ section }) => <Text style={s.dayLabel}>{section.title}</Text>}
-          ListEmptyComponent={<Text style={s.sheetEmpty}>{locale === 'hi-IN' ? 'अभी कोई इतिहास नहीं।' : 'Nothing here yet.'}</Text>}
-          renderItem={({ item: t }) => (
-            <Pressable
-              onPress={() => onAskAgain(t.said)}
-              accessibilityRole="button"
-              accessibilityHint="Asks this again"
-              style={({ pressed }) => [s.historyRow, pressed && { opacity: 0.6 }]}
-            >
-              <Text style={s.historySaid} numberOfLines={2}>
-                {t.said}
-              </Text>
-              <Text style={s.historyReply} numberOfLines={2}>
-                {t.reply}
-              </Text>
-              <View style={[s.metaRow, { marginTop: 0 }]}>
-                <RouteTag route={t.route} label={routeLabel(t)} c={c} s={s} />
-                <Text style={s.time}>{new Date(t.at).toLocaleTimeString('en-IN', { hour: 'numeric', minute: '2-digit' })}</Text>
-              </View>
-            </Pressable>
-          )}
-        />
-        {history.length > 0 && (
-          <View style={[s.sheetFooter, { paddingBottom: insets.bottom + 12 }]}>
-            <Pressable onPress={onClearHistory} hitSlop={8} accessibilityRole="button">
-              <Text style={s.clearHistory}>{locale === 'hi-IN' ? 'इतिहास मिटाएँ' : 'Clear history'}</Text>
+      <View style={s.root}>
+        <View style={[s.sheet, { paddingTop: insets.top }]}>
+          <View style={s.sheetHeader}>
+            <Text style={s.sheetTitle}>{locale === 'hi-IN' ? 'इतिहास' : 'History'}</Text>
+            <Pressable onPress={onClose} hitSlop={8} accessibilityRole="button" accessibilityLabel="Close history" style={s.headerBtn}>
+              <Feather name="x" size={16} color={c.ink} />
             </Pressable>
           </View>
-        )}
+          <SectionList
+            sections={sections}
+            keyExtractor={(t) => t.id}
+            contentContainerStyle={s.sheetList}
+            stickySectionHeadersEnabled
+            renderSectionHeader={({ section }) => <Text style={s.dayLabel}>{section.title}</Text>}
+            ListEmptyComponent={<Text style={s.sheetEmpty}>{locale === 'hi-IN' ? 'अभी कोई इतिहास नहीं।' : 'Nothing here yet.'}</Text>}
+            renderItem={({ item: t }) => (
+              <Pressable
+                onPress={() => onAskAgain(t.said)}
+                accessibilityRole="button"
+                accessibilityHint="Asks this again"
+                style={({ pressed }) => [s.historyRow, pressed && { opacity: 0.6 }]}
+              >
+                <Text style={s.historySaid} numberOfLines={2}>
+                  {t.said}
+                </Text>
+                <Text style={s.historyReply} numberOfLines={2}>
+                  {t.reply}
+                </Text>
+                <View style={[s.metaRow, { marginTop: 0 }]}>
+                  <RouteTag route={t.route} label={routeLabel(t)} c={c} s={s} />
+                  <Text style={s.time}>{new Date(t.at).toLocaleTimeString('en-IN', { hour: 'numeric', minute: '2-digit' })}</Text>
+                </View>
+              </Pressable>
+            )}
+          />
+          {history.length > 0 && (
+            <View style={[s.sheetFooter, { paddingBottom: insets.bottom + 12 }]}>
+              <Pressable onPress={onClearHistory} hitSlop={8} accessibilityRole="button">
+                <Text style={s.clearHistory}>{locale === 'hi-IN' ? 'इतिहास मिटाएँ' : 'Clear history'}</Text>
+              </Pressable>
+            </View>
+          )}
+        </View>
       </View>
     </Modal>
   );
@@ -506,7 +526,9 @@ function IconButton({ name, label, onPress, disabled, s, c }: SP & { name: keyof
     <Pressable
       onPress={onPress}
       disabled={disabled}
+      accessibilityRole="button"
       accessibilityLabel={label}
+      accessibilityState={{ disabled: !!disabled }}
       hitSlop={8}
       style={({ pressed }) => [s.iconBtn, { opacity: disabled ? 0.35 : pressed ? 0.6 : 1 }]}
     >
@@ -582,6 +604,9 @@ const styles = (c: Palette) =>
   StyleSheet.create({
     root: { flex: 1, backgroundColor: c.bg },
     flex: { flex: 1 },
+    // Phone-width column. On a phone this is the whole screen; in a desktop browser
+    // (the web demo) it stays centred instead of stretching across the window.
+    column: { flex: 1, width: '100%', maxWidth: Platform.OS === 'web' ? 520 : undefined, alignSelf: 'center' },
     header: {
       flexDirection: 'row',
       alignItems: 'center',
@@ -594,7 +619,7 @@ const styles = (c: Palette) =>
     headerRight: { flexDirection: 'row', alignItems: 'center', gap: 10 },
     headerBtn: { width: 35, height: 35, borderRadius: 18, borderWidth: 1, borderColor: c.line, alignItems: 'center', justifyContent: 'center' },
 
-    sheet: { flex: 1, backgroundColor: c.bg },
+    sheet: { flex: 1, backgroundColor: c.bg, width: '100%', maxWidth: Platform.OS === 'web' ? 520 : undefined, alignSelf: 'center' },
     sheetHeader: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', paddingHorizontal: 24, paddingTop: 16, paddingBottom: 12 },
     sheetTitle: { fontFamily: font.semibold, fontSize: 22, color: c.ink, letterSpacing: -0.6 },
     sheetList: { paddingHorizontal: 24, paddingBottom: 24 },

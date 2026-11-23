@@ -7,7 +7,7 @@
 import * as Speech from 'expo-speech';
 import { ExpoSpeechRecognitionModule, useSpeechRecognitionEvent } from 'expo-speech-recognition';
 import { useCallback, useRef, useState } from 'react';
-import { Animated } from 'react-native';
+import { Animated, Platform } from 'react-native';
 import type { Locale } from './actions';
 
 export type Phase = 'idle' | 'listening' | 'thinking' | 'speaking';
@@ -84,6 +84,16 @@ export function useVoice(onFinal: (text: string) => void) {
       return;
     }
     setPhase('idle');
+    // In a browser (the web demo) the causes and fixes are different from a phone's.
+    if (Platform.OS === 'web' && e.error !== 'no-speech' && e.error !== 'speech-timeout' && e.error !== 'aborted') {
+      setHint(
+        e.error === 'not-allowed' || e.error === 'service-not-allowed'
+          ? 'Allow the microphone for this site (the icon in the address bar), then try again. Typing still works.'
+          : // Brave and some other browsers ship the speech API but block the service behind it.
+            "This browser can't do speech recognition. Use Chrome or Edge, or type with the T button.",
+      );
+      return;
+    }
     if (e.error === 'no-speech' || e.error === 'speech-timeout' || e.error === 'aborted') {
       setHint("Didn't catch that. Tap and try again.");
     } else if (e.error === 'not-allowed') {
@@ -108,6 +118,10 @@ export function useVoice(onFinal: (text: string) => void) {
 
   const listen = useCallback(async (lang: Locale) => {
     Speech.stop();
+    if (Platform.OS === 'web' && !('SpeechRecognition' in globalThis || 'webkitSpeechRecognition' in globalThis)) {
+      setHint("This browser can't do speech recognition. Use Chrome or Edge, or type with the T button.");
+      return;
+    }
     const perm = await ExpoSpeechRecognitionModule.requestPermissionsAsync();
     if (!perm.granted) {
       setHint('Vaani needs the microphone to hear you.');

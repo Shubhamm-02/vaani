@@ -5,7 +5,7 @@
 const num = (v, d) => (v === undefined || v === '' || Number.isNaN(Number(v)) ? d : Number(v));
 
 // Bump when the system prompt or normalisation changes: old cache entries become unreachable.
-export const CACHE_VERSION = 'a3';
+export const CACHE_VERSION = 'a4';
 
 const PROVIDERS = {
   // Primary. Groq's free tier is per organisation *per model*:

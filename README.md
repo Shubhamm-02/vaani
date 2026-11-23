@@ -56,7 +56,7 @@ cd backend
 npm install
 cp .env.example .env      # add a free Groq key; with none it runs in demo (mock) mode
 npm run dev               # http://localhost:8787
-npm test                  # 28 tests
+npm test                  # 38 tests (incl. guardrails)
 npm run bench             # load test on one process (mock LLM)
 ```
 
@@ -77,6 +77,17 @@ npm run deploy:cf
 Check it with `curl https://<your-worker>.workers.dev/healthz`. The response should include `"cache":"kv"`.
 
 The alternative is Render's free tier for Node (`deploy/render.yaml`, with optional Upstash Redis as the shared cache). For the scaled production setup, see `Dockerfile` and `deploy/k8s.yaml`.
+
+### In a browser (no phone needed)
+
+The same app runs on the web through react-native-web. That's handy for demos.
+
+```bash
+cd backend && npm run dev          # terminal 1: API on :8787
+cd app && npm run web              # terminal 2: app on http://localhost:8082
+```
+
+Voice uses Chrome's speech recognition; allow the microphone when asked. Cloud answers, the three cache tiers, History, the theme toggle and Hindi all work. A browser can't set an alarm or place a call, so those commands are parsed on the device as usual and then **simulated**, and they say so ("Browser demo"). To use the live backend instead of a local one: `EXPO_PUBLIC_API_URL=https://vaani-api.vaaniii.workers.dev npm run web`.
 
 ### Android app
 
